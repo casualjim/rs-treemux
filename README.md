@@ -12,6 +12,7 @@ This router supports variables in the routing pattern and matches against the re
 The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching. Internally, it uses the [matchit](https://github.com/ibraheemdev/matchit) package.
 
 Treemux started as a fork of [httprouter-rs](https://github.com/ibraheemdev/httprouter-rs) by @ibraheemdev. And is just a learning project for me at the moment, to get more familiar with hyper and tower services.
+If you're familiar with the go world, this is the equivalent of [httptreemux](https://github.com/dimfeld/httptreemux) from @dimfeld vs [httprouter](https://github.com/julienschmidt/httprouter) from @julienschmidt. It also adds some middleware support.
 
 ## Features
 
