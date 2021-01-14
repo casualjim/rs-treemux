@@ -8,6 +8,7 @@ categories = ["web-programming::http-server", "network-programming", "algorithms
 keywords = ["hyper", "path", "tree", "radix", "router"]
 repository = "https://github.com/casualjim/rs-treemux/"
 readme = "README.md"
+license-file = "LICENSE"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
