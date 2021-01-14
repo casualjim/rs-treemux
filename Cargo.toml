@@ -1,6 +1,6 @@
 [package]
 name = "treemux"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Ivan Porto Carrero <ivan@flanders.co.nz>"]
 edition = "2018"
 description = "A high performance HTTP request router that scales well."
@@ -8,7 +8,7 @@ categories = ["web-programming::http-server", "network-programming", "algorithms
 keywords = ["hyper", "path", "tree", "radix", "router"]
 repository = "https://github.com/casualjim/rs-treemux/"
 readme = "README.md"
-license-file = "LICENSE"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
