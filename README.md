@@ -1,6 +1,6 @@
 # Treemux
 
-[![Documentation](https://img.shields.io/badge/docs-0.2.0-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.2.0)
+[![Documentation](https://img.shields.io/badge/docs-0.2.0-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.1.0)
 [![Version](https://img.shields.io/crates/v/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 [![License](https://img.shields.io/crates/l/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 [![Actions](https://img.shields.io/github/workflow/status/casualjim/rs-treemux/Rust/master?style=for-the-badge)](https://github.com/casualjim/rs-treemux/actions)
