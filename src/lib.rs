@@ -196,7 +196,12 @@
 //! // TODO
 //! ```
 
+#[macro_use]
+extern crate kv_log_macro;
+
 pub(crate) mod path;
+mod playground;
+mod tree;
 
 #[doc(hidden)]
 pub mod router;

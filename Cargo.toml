@@ -1,25 +1,43 @@
 [package]
-name = "treemux"
-version = "0.1.1"
 authors = ["Ivan Porto Carrero <ivan@flanders.co.nz>"]
-edition = "2018"
-description = "A high performance HTTP request router that scales well."
 categories = ["web-programming::http-server", "network-programming", "algorithms"]
+description = "A high performance HTTP request router that scales well."
+edition = "2018"
 keywords = ["hyper", "path", "tree", "radix", "router"]
-repository = "https://github.com/casualjim/rs-treemux/"
-readme = "README.md"
 license = "MIT"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+name = "treemux"
+readme = "README.md"
+repository = "https://github.com/casualjim/rs-treemux/"
+version = "0.1.1"
 
 [dependencies]
-matchit = "0.2"
 anyhow = "1"
+flate2 = "1"
+futures = "0.3"
+futures-util = "0.3"
+kv-log-macro = "1"
+matchit = "0.2"
+percent-encoding = "2"
 tokio = "1"
+tower-layer = "0.3"
+tower-service = "0.3"
 
 [dependencies.hyper]
-version = "0.14"
 features = ["server", "tcp", "http1", "http2"]
+version = "0.14"
+
+[dependencies.log]
+features = ["kv_unstable_std"]
+version = "0.4"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+pretty_env_logger = "0.4"
+
+[dev-dependencies.femme]
+branch = "allow-test-usage"
+git = "https://github.com/casualjim/femme"
+
+[dev-dependencies.tokio]
+features = ["full"]
+version = "1"
+
