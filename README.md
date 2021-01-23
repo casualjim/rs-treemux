@@ -31,7 +31,7 @@ Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/
 Here is a simple example:
 
 ```rust,no_run
-use treemux::{Router, Params};
+use treemux::{Treemux, RouterBuilder, Chain, Params};
 use std::convert::Infallible;
 use hyper::{Request, Response, Body};
 use anyhow::Error;
@@ -47,12 +47,12 @@ async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
 
 #[tokio::main]
 async fn main() {
-  let mut router: Router = Router::default();
+  let mut router = Treemux::builder();
   router.get("/", index);
   router.get("/hello/:user", hello);
 
   hyper::Server::bind(&([127, 0, 0, 1], 3000).into())
-    .serve(router.into_service())
+    .serve(Chain::new().log_requests().service(router.build()))
     .await;
 }
 ```
@@ -91,7 +91,7 @@ Pattern: /src/*filepath
 One might wish to modify automatic responses to OPTIONS requests, e.g. to support [CORS preflight requests](https://developer.mozilla.org/en-US/docs/Glossary/preflight_request) or to set other headers. This can be achieved using the [`Router::global_options`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.global_options) handler:
 
 ```rust
-use treemux::Router;
+use treemux::Treemux;
 use hyper::{Request, Response, Body};
 use anyhow::Error;
 
@@ -104,7 +104,7 @@ async fn global_options(_: Request<Body>) -> Result<Response<Body>, Error> {
 }
 
 fn main() {
-  let mut router: Router = Router::default();
+  let mut router: Treemux = Treemux::default();
   router.global_options(global_options);
 }
 ```
@@ -114,15 +114,15 @@ fn main() {
 Here is a quick example: Does your server serve multiple domains / hosts? You want to use sub-domains? Define a router per host!
 
 ```rust,no_run
-use treemux::Router;
+use treemux::{Treemux, RouterBuilder, Route};
 use treemux::router::RouterService;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server, StatusCode};
+use hyper::{http, Body, Request, Response, Server, StatusCode};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-pub struct HostSwitch(HashMap<String, Router>);
+pub struct HostSwitch(HashMap<String, Treemux<Route>>);
 
 impl HostSwitch {
   async fn serve(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
@@ -140,13 +140,13 @@ impl HostSwitch {
   }
 }
 
-async fn hello(_: Request<Body>) -> anyhow::Result<Response<Body>> {
+async fn hello(_: Request<Body>) -> Result<Response<Body>, http::Error> {
     Ok(Response::new(Body::default()))
 }
 
 #[tokio::main]
 async fn main() {
-  let mut router: Router = Router::default();
+  let mut router = Treemux::builder();
   router.get("/", hello);
 
   let mut host_switch: HostSwitch = HostSwitch(HashMap::new());
@@ -179,7 +179,7 @@ You can use another handler, to handle requests which could not be matched by th
 The `not_found` handler can for example be used to return a 404 page:
 
 ```rust
-use treemux::Router;
+use treemux::Treemux;
 use hyper::{Request, Response, Body};
 use anyhow::Error;
 
@@ -191,7 +191,7 @@ async fn not_found(req: Request<Body>) -> Result<Response<Body>, Error> {
 }
 
 fn main() {
-  let mut router: Router = Router::default();
+  let mut router: Treemux = Treemux::default();
   router.not_found(not_found);
 }
 ```

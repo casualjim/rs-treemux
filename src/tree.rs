@@ -1,6 +1,18 @@
-use hyper::Method;
+use hyper::{Method, StatusCode};
 use percent_encoding::percent_decode_str;
 use std::{borrow::Cow, collections::HashMap, fmt::Debug, iter::FromIterator, ops::Index, vec};
+
+use thiserror::{self, Error};
+
+#[derive(Error, Debug)]
+pub enum Error {
+  #[error("{0} was not found")]
+  NotFound(String),
+  #[error("{0} not allowed, only: {1:?}")]
+  MethodNotAllowed(Method, Vec<Method>),
+  #[error("{0}")]
+  StatusCode(StatusCode),
+}
 
 /// The response returned when getting the value for a specific path with
 /// [`Node::match_path`](crate::Node::match_path)
@@ -17,47 +29,48 @@ pub struct Match<'a, V> {
   pub add_slash: bool,
   /// The route parameters. See [parameters](/index.html#parameters) for more details.
   param_names: Vec<Cow<'a, str>>,
-  // pub parameters: HashMap<Cow<'a, str>, Cow<'a, str>>,
+  pub known_methods: Vec<Method>,
+  pub parameters: Params,
 }
 
 impl<'a, V> Match<'a, V> {
   /// The route parameters. See [parameters](/index.html#parameters) for more details.
-  pub fn parameters(&self) -> Params {
-    self.param_names.clone().into_iter().zip(self.params.clone()).collect()
+  pub fn update_parameters(&mut self) {
+    self.parameters = self.param_names.clone().into_iter().zip(self.params.clone()).collect();
   }
 }
 
 /// Param is a single URL parameter, consisting of a key and a value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Param<'a> {
-  pub key: Cow<'a, str>,
-  pub value: Cow<'a, str>,
+pub struct Param {
+  pub key: String,
+  pub value: String,
 }
 
-impl<'a> Param<'a> {
-  pub fn new(key: Cow<'a, str>, value: Cow<'a, str>) -> Self {
+impl Param {
+  pub fn new(key: String, value: String) -> Self {
     Self { key, value }
   }
 }
 
-impl<'a> From<(&'a str, &'a str)> for Param<'a> {
+impl<'a> From<(&'a str, &'a str)> for Param {
   fn from(input: (&'a str, &'a str)) -> Self {
     Param::new(input.0.into(), input.1.into())
   }
 }
 
-impl<'a, 'b> From<(&'a Cow<'b, str>, &'a Cow<'b, str>)> for Param<'a>
+impl<'a, 'b> From<(&'a Cow<'b, str>, &'a Cow<'b, str>)> for Param
 where
   'b: 'a,
 {
   fn from(input: (&'a Cow<'b, str>, &'a Cow<'b, str>)) -> Self {
-    Param::new(input.0.clone(), input.1.clone())
+    Param::new(input.0.to_string(), input.1.to_string())
   }
 }
 
-impl<'a> From<(Cow<'a, str>, Cow<'a, str>)> for Param<'a> {
+impl<'a> From<(Cow<'a, str>, Cow<'a, str>)> for Param {
   fn from(input: (Cow<'a, str>, Cow<'a, str>)) -> Self {
-    Param::new(input.0, input.1)
+    Param::new(input.0.to_string(), input.1.to_string())
   }
 }
 
@@ -77,37 +90,37 @@ impl<'a> From<(Cow<'a, str>, Cow<'a, str>)> for Param<'a> {
 ///  let third_key = &params[2].key;   // the name of the 3rd parameter
 ///  let third_value = &params[2].value; // the value of the 3rd parameter
 /// ```
-#[derive(Debug, PartialEq)]
-pub struct Params<'a>(pub Vec<Param<'a>>);
+#[derive(Debug, PartialEq, Clone)]
+pub struct Params(pub Vec<Param>);
 
-impl<'a> Default for Params<'a> {
+impl<'a> Default for Params {
   fn default() -> Self {
     Self(Vec::new())
   }
 }
 
-impl<'a> Index<usize> for Params<'a> {
-  type Output = Param<'a>;
+impl<'a> Index<usize> for Params {
+  type Output = Param;
 
   #[inline]
-  fn index(&self, i: usize) -> &Param<'a> {
+  fn index(&self, i: usize) -> &Param {
     &self.0[i]
   }
 }
 
-impl<'a> std::ops::IndexMut<usize> for Params<'a> {
-  fn index_mut(&mut self, i: usize) -> &mut Param<'a> {
+impl<'a> std::ops::IndexMut<usize> for Params {
+  fn index_mut(&mut self, i: usize) -> &mut Param {
     &mut self.0[i]
   }
 }
 
-impl<'a> FromIterator<(&'a str, &'a str)> for Params<'a> {
+impl<'a> FromIterator<(&'a str, &'a str)> for Params {
   fn from_iter<T: IntoIterator<Item = (&'a str, &'a str)>>(iter: T) -> Self {
     Params(iter.into_iter().map(Into::into).collect())
   }
 }
 
-impl<'a, 'b> FromIterator<(&'a Cow<'b, str>, &'a Cow<'b, str>)> for Params<'a>
+impl<'a, 'b> FromIterator<(&'a Cow<'b, str>, &'a Cow<'b, str>)> for Params
 where
   'b: 'a,
 {
@@ -116,16 +129,16 @@ where
   }
 }
 
-impl<'a> FromIterator<(Cow<'a, str>, Cow<'a, str>)> for Params<'a> {
+impl<'a> FromIterator<(Cow<'a, str>, Cow<'a, str>)> for Params {
   fn from_iter<T: IntoIterator<Item = (Cow<'a, str>, Cow<'a, str>)>>(iter: T) -> Self {
     Params(iter.into_iter().map(Into::into).collect())
   }
 }
 
-impl<'a> Params<'a> {
+impl Params {
   /// Returns the value of the first `Param` whose key matches the given name.
-  pub fn by_name(&self, name: &str) -> Option<&str> {
-    match self.0.iter().find(|param| param.key == name) {
+  pub fn get<K: AsRef<str>>(&self, name: K) -> Option<&str> {
+    match self.0.iter().find(|param| param.key == name.as_ref()) {
       Some(param) => Some(&param.value),
       None => None,
     }
@@ -136,7 +149,7 @@ impl<'a> Params<'a> {
   }
 
   /// Inserts a URL parameter into the vector
-  pub fn push<P: Into<Param<'a>>>(&mut self, p: P) {
+  pub fn push<P: Into<Param>>(&mut self, p: P) {
     self.0.push(p.into());
   }
 
@@ -166,7 +179,7 @@ pub struct Node<'a, V> {
 
 #[derive(Debug, PartialEq)]
 pub struct Handler<V> {
-  pub verb: Method,
+  pub method: Method,
   pub value: V,
   pub implicit_head: bool,
   pub add_slash: bool,
@@ -193,18 +206,18 @@ impl<'a, V> Default for Node<'a, V> {
 impl<'a, V> Node<'a, V> {
   pub fn new() -> Self {
     Node {
-      path: "/".into(),
+      path: "".into(),
       ..Default::default()
     }
   }
 
-  pub fn insert(&mut self, verb: Method, path: Cow<'a, str>, value: V) {
+  pub fn insert(&mut self, method: Method, path: Cow<'a, str>, value: V) {
     self.add_path(
       path,
       None,
       false,
       Handler {
-        verb,
+        method,
         value,
         implicit_head: false,
         add_slash: false,
@@ -212,38 +225,50 @@ impl<'a, V> Node<'a, V> {
     );
   }
 
-  pub fn search<'b>(&'b self, verb: &Method, path: Cow<'a, str>) -> Option<Match<'b, V>> {
-    self.internal_search(verb, path)
+  pub fn search<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<Match<'b, V>, Error> {
+    let pth = path.as_ref().to_string();
+    self.internal_search(method, pth.into()).map(|mut v| {
+      v.update_parameters();
+      v
+    })
   }
 
-  fn internal_search<'b>(&'b self, verb: &Method, path: Cow<'a, str>) -> Option<Match<'b, V>> {
+  fn internal_search<'b>(&'b self, method: &'b Method, path: Cow<'b, str>) -> Result<Match<'b, V>, Error> {
     let path_len = path.len();
     if path.is_empty() {
+      let mut allowed_methods = vec![];
+      for key in self.leaf_handler.keys() {
+        if key != method {
+          allowed_methods.push(key.clone());
+        }
+      }
       if self.leaf_handler.is_empty() {
-        return None;
+        return Err(Error::MethodNotAllowed(method.clone(), allowed_methods));
       }
 
-      return Some(Match {
-        value: self.leaf_handler.get(&verb),
+      return Ok(Match {
+        value: self.leaf_handler.get(method),
         params: vec![],
         path,
         pattern: self.path.clone(),
         param_names: self.leaf_wildcard_names.clone().unwrap_or_default(),
         implicit_head: self.implicit_head,
         add_slash: self.add_slash,
+        known_methods: allowed_methods,
+        parameters: Params::default(),
       });
     }
 
     // First see if this matches a static token.
     let first_char = &path.chars().next().unwrap();
-    let mut found = None;
+    let mut found = Err(Error::NotFound(path.to_string()));
     for (i, static_index) in (&self.static_indices).iter().enumerate() {
       if static_index == first_char {
         let child = self.static_child[i].as_ref().unwrap();
         let child_path_len = child.path.len();
         if path_len >= child_path_len && child.path == path[..child_path_len] {
           let next_path = path.chars().skip(child_path_len).collect();
-          found = child.search(verb, next_path);
+          found = child.internal_search(method, next_path);
         }
         break;
       }
@@ -251,7 +276,7 @@ impl<'a, V> Node<'a, V> {
 
     // If we found a node and it had a valid handler, then return here. Otherwise
     // let's remember that we found this one, but look for a better match.
-    if found.as_ref().filter(|v| v.value.is_some()).is_some() {
+    if found.as_ref().ok().filter(|v| v.value.is_some()).is_some() {
       return found;
     }
 
@@ -261,22 +286,22 @@ impl<'a, V> Node<'a, V> {
       let next_token: Cow<'a, str> = path.chars().skip(next_slash).collect();
 
       if !this_token.is_empty() {
-        let wc_match = wildcard_child.search(verb, next_token);
+        let wc_match = wildcard_child.internal_search(method, next_token);
 
-        if wc_match.as_ref().filter(|v| v.value.is_some()).is_some() || (found.is_none() && wc_match.is_some()) {
+        if wc_match.as_ref().ok().filter(|v| v.value.is_some()).is_some() || (found.is_err() && wc_match.is_ok()) {
           let pth = percent_decode_str(this_token.as_ref()).decode_utf8_lossy().to_string();
 
-          if let Some(mut the_match) = wc_match {
+          if let Ok(mut the_match) = wc_match {
             let mut nwparams = vec![pth.into()];
-            nwparams.append(&mut the_match.params);
+            nwparams.append(&mut the_match.params.to_vec());
             the_match.params = nwparams;
             if the_match.value.as_ref().is_some() {
               if the_match.param_names.is_empty() {
                 the_match.param_names = wildcard_child.leaf_wildcard_names.clone().unwrap_or_default();
               }
-              return Some(the_match);
+              return Ok(the_match);
             } else {
-              found = Some(the_match);
+              found = Ok(the_match);
             }
           } else {
             // Didn't actually find a handler here, so remember that we
@@ -291,20 +316,28 @@ impl<'a, V> Node<'a, V> {
     if let Some(catch_all_child) = self.catch_all_child.as_ref() {
       // Hit the catchall, so just assign the whole remaining path if it
       // has a matching handler.
-      let handler = catch_all_child.leaf_handler.get(&verb);
+      let handler = catch_all_child.leaf_handler.get(&method);
+      let mut allowed_methods = vec![];
+      for key in catch_all_child.leaf_handler.keys() {
+        if handler.is_none() || key != method {
+          allowed_methods.push(key.clone());
+        }
+      }
 
       // Found a handler, or we found a catchall node without a handler.
       // Either way, return it since there's nothing left to check after this.
-      if handler.is_some() || found.is_none() {
+      if handler.is_some() || found.is_err() {
         let pth = percent_decode_str(path.as_ref()).decode_utf8_lossy().to_string();
-        return Some(Match {
+        return Ok(Match {
           value: handler,
           params: vec![pth.clone().into()],
           pattern: pth.into(),
           param_names: catch_all_child.leaf_wildcard_names.clone().unwrap_or_default(),
-          path,
+          path: self.path.clone(),
           add_slash: catch_all_child.add_slash,
           implicit_head: catch_all_child.implicit_head,
+          known_methods: allowed_methods,
+          parameters: Params::default(),
         });
       }
     }
@@ -360,16 +393,173 @@ impl<'a, V> Node<'a, V> {
     }
   }
 
-  fn set_handler(&mut self, verb: Method, handler: V, implicit_head: bool, add_slash: bool) {
-    if self.leaf_handler.contains_key(&verb) && (verb != Method::HEAD || !self.implicit_head) {
-      panic!("{} already handles {}", self.path, verb)
+  fn set_handler(&mut self, method: Method, handler: V, implicit_head: bool, add_slash: bool) {
+    if self.leaf_handler.contains_key(&method) && (method != Method::HEAD || !self.implicit_head) {
+      panic!("{} already handles {}", self.path, method)
     }
 
-    if verb == Method::HEAD {
+    if method == Method::HEAD {
       self.implicit_head = implicit_head;
     }
     self.add_slash = add_slash;
-    self.leaf_handler.insert(verb, handler);
+    self.leaf_handler.insert(method, handler);
+  }
+
+  pub fn add_node(&mut self, path: Cow<'a, str>, node: Node<'a, V>) {
+    self.internal_add_node(path, None, false, node)
+  }
+
+  fn add_wildcards_to_leafs(&mut self, wildcards: &[Cow<'a, str>]) {
+    for n in self.static_child.iter_mut().map(|v| v.as_mut()) {
+      if let Some(n) = n {
+        if !n.leaf_handler.is_empty() {
+          n.leaf_wildcard_names = Some(wildcards.to_vec());
+        } else {
+          n.add_wildcards_to_leafs(wildcards)
+        }
+      }
+    }
+
+    if let Some(wc) = self.wildcard_child.as_mut() {
+      if !wc.leaf_handler.is_empty() {
+        wc.leaf_wildcard_names = Some(wildcards.to_vec());
+      }
+      wc.add_wildcards_to_leafs(wildcards)
+    }
+  }
+  fn internal_add_node(
+    &mut self,
+    path: Cow<'a, str>,
+    wildcards: Option<Vec<Cow<'a, str>>>,
+    in_static_token: bool,
+    mut node: Node<'a, V>,
+  ) {
+    if path.is_empty() {
+      if let Some(ref wildcards) = wildcards {
+        // Make sure the current wildcards are the same as the old ones.
+        // When they aren't, we have an ambiguous path
+        if let Some(leaf_wildcards) = &self.leaf_wildcard_names {
+          if wildcards.len() != leaf_wildcards.len() {
+            // this should never happen, they said
+            panic!("Reached leaf node with differing wildcard slice length. Please report this as a bug.")
+          }
+
+          if wildcards != leaf_wildcards {
+            panic!("Wildcards {:?} are ambiguous with {:?}.", leaf_wildcards, wildcards);
+          }
+        } else {
+          node.add_wildcards_to_leafs(wildcards);
+
+          // self.leaf_wildcard_names = Some(wildcards.clone());
+        }
+      }
+      self.static_child = node.static_child;
+      self.static_indices = node.static_indices;
+      self.wildcard_child = node.wildcard_child;
+      // self.leaf_wildcard_names = wildcards;
+
+      return;
+    }
+
+    let mut c = path.chars().next().unwrap();
+    let next_slash = path.chars().position(|c| c == '/');
+
+    let (mut this_token, token_end) = if c == '/' {
+      ("/".into(), Some(1))
+    } else if next_slash.is_none() {
+      let ln = Some(path.len());
+      (path.clone().to_string(), ln)
+    } else {
+      (path.chars().take(next_slash.unwrap_or_default()).collect(), next_slash)
+    };
+
+    let remaining_path = path.chars().skip(token_end.unwrap_or_default()).collect();
+
+    if c == '*' {
+      panic!("it's not allowed to add catch alls as a group")
+    } else if c == ':' && !in_static_token {
+      this_token = (&this_token[1..]).into();
+      let wil = wildcards
+        .map(|mut tokens| {
+          tokens.push(this_token.clone().into());
+          tokens
+        })
+        .or_else(|| Some(vec![this_token.clone().into()]));
+
+      if self.wildcard_child.is_none() {
+        self.wildcard_child = Some(Box::new(Node {
+          path: this_token.into(),
+          ..Default::default()
+        }));
+      }
+
+      // self.wildcard_child;
+      self.wildcard_child.as_mut().map(|ch| {
+        ch.internal_add_node(remaining_path, wil, false, node);
+        ch
+      });
+    } else {
+      let mut unescaped = false;
+      if this_token.len() >= 2
+        && !in_static_token
+        && (this_token.starts_with('\\')
+          && (this_token.chars().nth(1).unwrap() == '*'
+            || this_token.chars().nth(1).unwrap() == ':'
+            || this_token.chars().nth(1).unwrap() == '\\'))
+      {
+        c = this_token.chars().nth(1).unwrap();
+        // The token starts with a character escaped by a backslash. Drop the backslash.
+        this_token = (&this_token[1..]).to_string();
+        unescaped = true;
+      }
+
+      // Set inStaticToken to ensure that the rest of this token is not mistaken
+      // for a wildcard if a prefix split occurs at a '*' or ':'.
+      let in_static_token = c != '/';
+      let token: Cow<str> = this_token.into();
+      // Do we have an existing node that starts with the same letter?
+      for (i, indexchar) in self.static_indices.clone().iter().enumerate() {
+        if c == *indexchar {
+          // Yes. Split it based on the common prefix of the existing
+          // node and the new one.
+          let mut prefix_split = self.split_common_prefix(i, token.clone());
+
+          self.static_child.get_mut(i).map(|maybe_child| {
+            maybe_child.as_mut().map(|child| {
+              child.priority += 1;
+            })
+          });
+
+          if unescaped {
+            prefix_split += 1
+          }
+
+          self.static_child.get_mut(i).map(|maybe_child| {
+            maybe_child.as_mut().map(|child| {
+              child.internal_add_node(
+                (&path[prefix_split..]).to_string().into(),
+                wildcards,
+                in_static_token,
+                node,
+              );
+            })
+          });
+          self.sort_static_child(i);
+
+          return;
+        }
+      }
+
+      // No existing node starting with this letter, so create it.
+      let mut child = Self {
+        path: token,
+        ..Default::default()
+      };
+      self.static_indices.append(&mut vec![c]);
+      child.internal_add_node(remaining_path, wildcards, in_static_token, node);
+      let chld = Some(Box::new(child));
+      self.static_child.append(&mut vec![chld]);
+    }
   }
 
   fn add_path(
@@ -396,7 +586,7 @@ impl<'a, V> Node<'a, V> {
           self.leaf_wildcard_names = Some(wildcards.clone());
         }
       }
-      self.set_handler(handler.verb, handler.value, handler.implicit_head, handler.add_slash);
+      self.set_handler(handler.method, handler.value, handler.implicit_head, handler.add_slash);
       return;
     }
 
@@ -447,7 +637,7 @@ impl<'a, V> Node<'a, V> {
         },
       );
       self.catch_all_child.as_mut().map(move |mut n| {
-        n.set_handler(handler.verb, handler.value, handler.implicit_head, handler.add_slash);
+        n.set_handler(handler.method, handler.value, handler.implicit_head, handler.add_slash);
         n.leaf_wildcard_names = Some(wildc);
         n
       });
@@ -530,7 +720,7 @@ impl<'a, V> Node<'a, V> {
         path: token,
         ..Default::default()
       };
-      // child.set_handler(verb, handler, implicit_head)
+      // child.set_handler(method, handler, implicit_head)
       self.static_indices.append(&mut vec![c]);
       child.add_path(remaining_path, wildcards, in_static_token, handler);
       let chld = Some(Box::new(child));
@@ -855,17 +1045,17 @@ mod tests {
     node: &Node<'static, ReqHandler>,
     path: &'static str,
     expected_path: &'static str,
-    expected_params: Params<'static>,
+    expected_params: Params,
   ) {
-    let mtc = node.search(&Method::GET, path[1..].into());
-    if !expected_path.is_empty() && mtc.is_none() {
+    let mtc = node.search(&Method::GET, &path[1..]);
+    if !expected_path.is_empty() && mtc.is_err() {
       panic!(
         "No match for {}, expected {}\n{}",
         path,
         expected_path,
         node.dump_tree("", "")
       )
-    } else if expected_path.is_empty() && mtc.is_some() {
+    } else if expected_path.is_empty() && mtc.is_ok() {
       panic!(
         "Expected no match for {} but got {:?} with params {:?}.\nNode and subtree was\n{}",
         path,
@@ -875,7 +1065,7 @@ mod tests {
       );
     }
 
-    if mtc.is_none() {
+    if mtc.is_err() {
       return;
     }
 
@@ -927,7 +1117,7 @@ mod tests {
         );
       }
 
-      let params = mtc.parameters();
+      let params = mtc.parameters;
       assert_eq!(expected_params, params, "expected_path={}", expected_path);
     }
   }
@@ -946,7 +1136,7 @@ mod tests {
       Some(vec!["first".into(), "second".into()]),
       false,
       Handler {
-        verb: Method::GET,
+        method: Method::GET,
         value: (),
         implicit_head: false,
         add_slash: false,
@@ -964,7 +1154,7 @@ mod tests {
       None,
       false,
       Handler {
-        verb: Method::GET,
+        method: Method::GET,
         value: (),
         implicit_head: false,
         add_slash: false,
@@ -982,7 +1172,7 @@ mod tests {
       None,
       false,
       Handler {
-        verb: Method::GET,
+        method: Method::GET,
         value: (),
         implicit_head: false,
         add_slash: false,
@@ -993,7 +1183,7 @@ mod tests {
       None,
       false,
       Handler {
-        verb: Method::GET,
+        method: Method::GET,
         value: (),
         implicit_head: false,
         add_slash: false,
@@ -1011,7 +1201,7 @@ mod tests {
       None,
       false,
       Handler {
-        verb: Method::GET,
+        method: Method::GET,
         value: (),
         implicit_head: false,
         add_slash: false,
@@ -1028,7 +1218,7 @@ mod tests {
       wildcards.clone(),
       false,
       Handler {
-        verb: Method::GET,
+        method: Method::GET,
         value: (),
         implicit_head: false,
         add_slash: false,

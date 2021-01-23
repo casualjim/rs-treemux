@@ -28,7 +28,7 @@
 //! Here is a simple example:
 //!
 //! ```rust,no_run
-//! use treemux::{Router, Params, Handler};
+//! use treemux::{Treemux, Router, Params, Handler};
 //! use std::convert::Infallible;
 //! use hyper::{Request, Response, Body};
 //! use anyhow::Error;
@@ -44,7 +44,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut router: Router = Router::default();
+//!     let mut router: Treemux<_, _> = Treemux::default();
 //!     router.get("/", index);
 //!     router.get("/hello/:user", hello);
 //!
@@ -88,7 +88,7 @@
 //! One might wish to modify automatic responses to OPTIONS requests, e.g. to support [CORS preflight requests](https://developer.mozilla.org/en-US/docs/Glossary/preflight_request) or to set other headers. This can be achieved using the [`Router::global_options`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.global_options) handler:
 //!
 //! ```rust
-//! use treemux::{Router, Handler};
+//! use treemux::{Treemux, Handler};
 //! use hyper::{Request, Response, Body};
 //! use anyhow::Error;
 //!
@@ -101,7 +101,7 @@
 //! }
 //!
 //! fn main() {
-//!   let mut router: Router = Router::default();
+//!   let mut router: Treemux = Treemux::default();
 //!   router.global_options(global_options);
 //! }
 //! ```
@@ -111,7 +111,7 @@
 //! Here is a quick example: Does your server serve multiple domains / hosts? You want to use sub-domains? Define a router per host!
 //!
 //! ```rust,no_run
-//! use treemux::{Handler, Router};
+//! use treemux::{Handler, Treemux, Route};
 //! use treemux::router::RouterService;
 //! use hyper::service::{make_service_fn, service_fn};
 //! use hyper::{Body, Request, Response, Server, StatusCode};
@@ -119,7 +119,7 @@
 //! use std::convert::Infallible;
 //! use std::sync::Arc;
 //!
-//! pub struct HostSwitch(HashMap<String, Router>);
+//! pub struct HostSwitch(HashMap<String, Treemux<Route>>);
 //!
 //! impl HostSwitch {
 //!     async fn serve(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
@@ -176,10 +176,10 @@
 //! The `not_found` handler can for example be used to return a 404 page:
 //!
 //! ```rust
-//! use treemux::{Router, Handler};
+//! use treemux::{Treemux, Handler};
 //! use hyper::{Request, Response, Body};
 //!
-//! let mut router: Router = Router::default();
+//! let mut router: Treemux = Treemux::default();
 //! router.not_found(|_| async {
 //!     Ok(Response::builder()
 //!         .status(400)
@@ -200,17 +200,13 @@
 extern crate kv_log_macro;
 
 pub(crate) mod path;
-mod playground;
 mod tree;
 
 #[doc(hidden)]
 pub mod router;
 
 #[doc(inline)]
-pub use router::{Handler, Router};
-
-#[doc(inline)]
-pub use matchit::Params;
+pub use router::{Handler, RouterBuilder, Treemux};
 
 // // test the code examples in README.md
 #[cfg(doctest)]

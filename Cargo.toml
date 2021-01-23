@@ -12,11 +12,11 @@ version = "0.1.1"
 
 [dependencies]
 anyhow = "1"
+thiserror = "1"
 flate2 = "1"
 futures = "0.3"
 futures-util = "0.3"
 kv-log-macro = "1"
-matchit = "0.2"
 percent-encoding = "2"
 tokio = "1"
 tower-layer = "0.3"
