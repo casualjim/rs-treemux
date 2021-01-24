@@ -1,4 +1,4 @@
-use hyper::{Method, StatusCode};
+use hyper::Method;
 use percent_encoding::percent_decode_str;
 use std::{borrow::Cow, collections::HashMap, fmt::Debug, iter::FromIterator, ops::Index, vec};
 
@@ -10,8 +10,6 @@ pub enum Error {
   NotFound(String),
   #[error("{0} not allowed, only: {1:?}")]
   MethodNotAllowed(Method, Vec<Method>),
-  #[error("{0}")]
-  StatusCode(StatusCode),
 }
 
 /// The response returned when getting the value for a specific path with
@@ -78,14 +76,14 @@ impl<'a> From<(Cow<'a, str>, Cow<'a, str>)> for Param {
 /// There are two ways to retrieve the value of a parameter:
 ///  1) by the name of the parameter
 /// ```rust
-///  # use matchit::Params;
+///  # use treemux::Params;
 ///  # let params = Params::default();
-
-///  let user = params.by_name("user"); // defined by :user or *user
+///
+///  let user = params.get("user"); // defined by :user or *user
 /// ```
 ///  2) by the index of the parameter. This way you can also get the name (key)
 /// ```rust,no_run
-///  # use matchit::Params;
+///  # use treemux::Params;
 ///  # let params = Params::default();
 ///  let third_key = &params[2].key;   // the name of the 3rd parameter
 ///  let third_value = &params[2].value; // the value of the 3rd parameter
@@ -178,11 +176,11 @@ pub struct Node<'a, V> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Handler<V> {
-  pub method: Method,
-  pub value: V,
-  pub implicit_head: bool,
-  pub add_slash: bool,
+struct Handler<V> {
+  method: Method,
+  value: V,
+  implicit_head: bool,
+  add_slash: bool,
 }
 
 impl<'a, V> Default for Node<'a, V> {
@@ -203,34 +201,80 @@ impl<'a, V> Default for Node<'a, V> {
   }
 }
 
-impl<'a, V> Node<'a, V> {
+#[derive(Debug, Default)]
+pub struct HandlerConfig<'a, V> {
+  pub method: Method,
+  pub path: Cow<'a, str>,
+  pub implicit_head: bool,
+  pub add_slash: bool,
+  pub value: V,
+}
+
+fn strip_start_slash(path: Cow<str>) -> Cow<str> {
+  if path.starts_with('/') {
+    path.strip_prefix('/').unwrap().to_string().into()
+  } else {
+    path
+  }
+}
+
+impl<'a, V> HandlerConfig<'a, V> {
+  pub fn new(method: Method, path: Cow<'a, str>, value: V) -> HandlerConfig<'a, V> {
+    HandlerConfig {
+      method,
+      path,
+      implicit_head: false,
+      add_slash: false,
+      value,
+    }
+  }
+
+  fn stripped_path(&self) -> Cow<'a, str> {
+    strip_start_slash(self.path.clone())
+  }
+
+  pub fn needs_slash(mut self) -> Self {
+    self.add_slash = true;
+    self
+  }
+}
+
+type IdxTuple = (usize, char);
+type IdxVec = Vec<IdxTuple>;
+
+impl<'a, V> Node<'a, V>
+where
+  V: Clone,
+{
   pub fn new() -> Self {
     Node {
-      path: "".into(),
+      path: "/".into(),
       ..Default::default()
     }
   }
 
-  pub fn insert(&mut self, method: Method, path: Cow<'a, str>, value: V) {
+  pub fn insert(&mut self, config: HandlerConfig<'a, V>) {
     self.add_path(
-      path,
+      config.stripped_path(),
       None,
       false,
       Handler {
-        method,
-        value,
-        implicit_head: false,
-        add_slash: false,
+        method: config.method,
+        value: config.value,
+        implicit_head: config.implicit_head,
+        add_slash: config.add_slash,
       },
     );
   }
 
   pub fn search<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<Match<'b, V>, Error> {
     let pth = path.as_ref().to_string();
-    self.internal_search(method, pth.into()).map(|mut v| {
-      v.update_parameters();
-      v
-    })
+    self
+      .internal_search(method, strip_start_slash(pth.into()))
+      .map(|mut v| {
+        v.update_parameters();
+        v
+      })
   }
 
   fn internal_search<'b>(&'b self, method: &'b Method, path: Cow<'b, str>) -> Result<Match<'b, V>, Error> {
@@ -405,8 +449,8 @@ impl<'a, V> Node<'a, V> {
     self.leaf_handler.insert(method, handler);
   }
 
-  pub fn add_node(&mut self, path: Cow<'a, str>, node: Node<'a, V>) {
-    self.internal_add_node(path, None, false, node)
+  pub fn extend(&mut self, path: Cow<'a, str>, node: Node<'a, V>) {
+    self.internal_add_node(strip_start_slash(path), None, false, node, true)
   }
 
   fn add_wildcards_to_leafs(&mut self, wildcards: &[Cow<'a, str>]) {
@@ -427,14 +471,23 @@ impl<'a, V> Node<'a, V> {
       wc.add_wildcards_to_leafs(wildcards)
     }
   }
+
+  const JUST_SLASH: &'static [char] = &['/'];
   fn internal_add_node(
     &mut self,
     path: Cow<'a, str>,
     wildcards: Option<Vec<Cow<'a, str>>>,
     in_static_token: bool,
     mut node: Node<'a, V>,
+    is_first: bool,
   ) {
     if path.is_empty() {
+      // When we found a place to attach the new node, we need to make sure
+      // that we move the handlers from the root node in the new node at '/'
+      // to the new root node as if it was explicitly defined
+      if node.path == "/" && self.static_indices == Self::JUST_SLASH {
+        self.leaf_handler.extend(std::mem::take(&mut node.leaf_handler));
+      }
       if let Some(ref wildcards) = wildcards {
         // Make sure the current wildcards are the same as the old ones.
         // When they aren't, we have an ambiguous path
@@ -449,14 +502,59 @@ impl<'a, V> Node<'a, V> {
           }
         } else {
           node.add_wildcards_to_leafs(wildcards);
-
-          // self.leaf_wildcard_names = Some(wildcards.clone());
         }
       }
-      self.static_child = node.static_child;
-      self.static_indices = node.static_indices;
-      self.wildcard_child = node.wildcard_child;
-      // self.leaf_wildcard_names = wildcards;
+      if let Some(idx) = self.static_indices.iter().position(|c| c == &'/') {
+        if let Some(mut previous) = self.static_child[idx].replace(Box::new(node)) {
+          let n = self.static_child[idx].as_mut().unwrap();
+          let (known, unknown): (IdxVec, IdxVec) = previous
+            .static_indices
+            .iter()
+            .copied()
+            .enumerate()
+            .partition(|&c| n.static_indices.contains(&c.1));
+
+          for (fidx, c) in unknown {
+            n.static_indices.push(c);
+            n.static_child.push(previous.static_child[fidx].take());
+          }
+
+          for (fidx, c) in known {
+            let nidx = n.static_indices.iter().position(|cc| cc == &c).unwrap();
+            let prev = previous.static_child[fidx].as_mut().unwrap();
+            n.static_child[nidx]
+              .as_ref()
+              .unwrap()
+              .leaf_handler
+              .iter()
+              .for_each(|(method, route)| {
+                prev.leaf_handler.insert(method.clone(), route.clone());
+              });
+            n.static_child[nidx].as_mut().unwrap().leaf_handler = prev.leaf_handler.clone();
+          }
+        }
+      } else {
+        if let Some(ref wildcards) = wildcards {
+          // Make sure the current wildcards are the same as the old ones.
+          // When they aren't, we have an ambiguous path
+          if let Some(leaf_wildcards) = &node.leaf_wildcard_names {
+            if wildcards.len() != leaf_wildcards.len() {
+              // this should never happen, they said
+              panic!("Reached leaf node with differing wildcard slice length. Please report this as a bug.")
+            }
+
+            if wildcards != leaf_wildcards {
+              panic!("Wildcards {:?} are ambiguous with {:?}.", leaf_wildcards, wildcards);
+            }
+          } else {
+            self.leaf_wildcard_names = Some(wildcards.to_vec());
+          }
+        }
+
+        self.leaf_handler.extend(std::mem::take(&mut node.leaf_handler));
+        self.static_child.push(Some(Box::new(node)));
+        self.static_indices.push('/');
+      }
 
       return;
     }
@@ -493,9 +591,8 @@ impl<'a, V> Node<'a, V> {
         }));
       }
 
-      // self.wildcard_child;
       self.wildcard_child.as_mut().map(|ch| {
-        ch.internal_add_node(remaining_path, wil, false, node);
+        ch.internal_add_node(remaining_path, wil, false, node, false);
         ch
       });
     } else {
@@ -541,6 +638,7 @@ impl<'a, V> Node<'a, V> {
                 wildcards,
                 in_static_token,
                 node,
+                is_first,
               );
             })
           });
@@ -556,7 +654,7 @@ impl<'a, V> Node<'a, V> {
         ..Default::default()
       };
       self.static_indices.append(&mut vec![c]);
-      child.internal_add_node(remaining_path, wildcards, in_static_token, node);
+      child.internal_add_node(remaining_path, wildcards, in_static_token, node, false);
       let chld = Some(Box::new(child));
       self.static_child.append(&mut vec![chld]);
     }
@@ -720,7 +818,6 @@ impl<'a, V> Node<'a, V> {
         path: token,
         ..Default::default()
       };
-      // child.set_handler(method, handler, implicit_head)
       self.static_indices.append(&mut vec![c]);
       child.add_path(remaining_path, wildcards, in_static_token, handler);
       let chld = Some(Box::new(child));
@@ -779,71 +876,295 @@ impl<'a, V> Node<'a, V> {
 mod tests {
   use hyper::{Body, Method, Request, Response, StatusCode};
 
-  use std::{panic, vec};
+  use std::{panic, sync::Arc, vec};
 
-  use super::{Handler, Node, Params};
+  use super::{Handler, HandlerConfig, Node, Params};
 
-  type ReqHandler = Box<dyn Fn(Request<Body>) -> Response<Body>>;
+  type ReqHandler = Arc<dyn Fn(Request<Body>) -> Response<Body>>;
 
-  fn add_path(node: &mut Node<'static, ReqHandler>, path: &'static str) {
+  fn make_root_node<'a>() -> Node<'a, ReqHandler> {
+    let mut root = Node::new();
+    add_path(&mut root, "/", "root-router");
+    add_method_path(&mut root, Method::POST, "/", "root-router");
+    add_path(&mut root, "/images", "root-router");
+    add_path(&mut root, "/images/abc.jpg", "root-router");
+    add_path(&mut root, "/images/:imgname", "root-router");
+    add_path(&mut root, "/images/\\*path", "root-router");
+    add_path(&mut root, "/images/\\*patch", "root-router");
+    add_path(&mut root, "/images/*path", "root-router");
+    add_path(&mut root, "/appcenter", "root-router");
+    add_path(&mut root, "/apps", "root-router");
+    add_path(&mut root, "/apps/inventory", "root-router");
+    add_method_path(&mut root, Method::POST, "/apps/inventory", "root-router");
+    add_path(&mut root, "/apps/settings/default", "root-router");
+    add_path(&mut root, "/post/:post/page/:page", "root-router");
+    root
+  }
+  #[tokio::test]
+  async fn test_merge_node_no_overlap() {
+    let mut root = make_root_node();
+
+    // no overlap with existing paths, so just inserts
+    let mut sub1 = Node::new();
+    add_path(&mut sub1, "/", "sub1-router");
+    add_path(&mut sub1, "/approve", "sub1-router");
+    add_path(&mut sub1, "/unapprove", "sub1-router");
+    root.extend("/api".into(), sub1);
+
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/api/approve",
+      "/approve",
+      "sub1-router",
+      Params::default(),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/apps/inventory",
+      "/apps/inventory",
+      "root-router",
+      Params::default(),
+    )
+    .await;
+  }
+  #[tokio::test]
+  async fn test_merge_node_simple_overlap() {
+    let mut root = make_root_node();
+    // overlaps with existing paths, this overrides (Method, Path) entries that previously existed
+    let mut sub2 = Node::new();
+    add_path(&mut sub2, "/", "sub2-router");
+    add_path(&mut sub2, "/search", "sub2-router");
+    add_path(&mut sub2, "/settings/other", "sub2-router");
+    add_method_path(&mut sub2, Method::POST, "/inventory", "sub2-router");
+
+    root.extend("/apps".into(), sub2);
+
+    test_path_ext(&root, &Method::GET, "/apps", "/", "sub2-router", Params::default()).await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/apps/search",
+      "/search",
+      "sub2-router",
+      Params::default(),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/apps/inventory",
+      "/apps/inventory",
+      "root-router",
+      Params::default(),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::POST,
+      "/apps/inventory",
+      "/inventory",
+      "sub2-router",
+      Params::default(),
+    )
+    .await;
+  }
+
+  #[tokio::test]
+  async fn test_merge_node_no_overlap_root() {
+    let mut root = make_root_node();
+    let mut sub2 = Node::new();
+    add_path(&mut sub2, "/search", "sub2-router");
+    add_path(&mut sub2, "/settings/other", "sub2-router");
+    add_method_path(&mut sub2, Method::POST, "/inventory", "sub2-router");
+
+    root.extend("/apps".into(), sub2);
+
+    test_path_ext(&root, &Method::GET, "/apps", "/apps", "root-router", Params::default()).await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/apps/search",
+      "/search",
+      "sub2-router",
+      Params::default(),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/apps/inventory",
+      "/apps/inventory",
+      "root-router",
+      Params::default(),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::POST,
+      "/apps/inventory",
+      "/inventory",
+      "sub2-router",
+      Params::default(),
+    )
+    .await;
+  }
+
+  #[tokio::test]
+  async fn test_merge_node_route_params_no_overlap() {
+    let mut root = make_root_node();
+    let mut sub3 = Node::new();
+    add_path(&mut sub3, "/", "sub3-router");
+    add_path(&mut sub3, "/approve", "sub3-router");
+    add_path(&mut sub3, "/unapprove", "sub3-router");
+    root.extend("/blog/post/:post/page/:page".into(), sub3);
+
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/blog/post/4254/page/3/approve",
+      "/approve",
+      "sub3-router",
+      Params(vec![("post", "4254").into(), ("page", "3").into()]),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/blog/post/4254/page/3",
+      "/",
+      "sub3-router",
+      Params(vec![("post", "4254").into(), ("page", "3").into()]),
+    )
+    .await;
+  }
+  #[tokio::test]
+  async fn test_merge_node_route_params_overlap() {
+    let mut root = make_root_node();
+    let mut sub4 = Node::new();
+    add_path(&mut sub4, "/", "sub4-router");
+    add_path(&mut sub4, "/approve", "sub4-router");
+    add_path(&mut sub4, "/unapprove", "sub4-router");
+    root.extend("/post/:post/page/:page".into(), sub4);
+
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/post/4254/page/3/approve",
+      "/approve",
+      "sub4-router",
+      Params(vec![("post", "4254").into(), ("page", "3").into()]),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/post/4254/page/3",
+      "/",
+      "sub4-router",
+      Params(vec![("post", "4254").into(), ("page", "3").into()]),
+    )
+    .await;
+  }
+  #[tokio::test]
+  async fn test_merge_node_route_params_root_overlap() {
+    let mut root = make_root_node();
+    let mut sub4 = Node::new();
+    add_path(&mut sub4, "/approve", "sub4-router");
+    add_path(&mut sub4, "/unapprove", "sub4-router");
+    root.extend("/post/:post/page/:page".into(), sub4);
+
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/post/4254/page/3/approve",
+      "/approve",
+      "sub4-router",
+      Params(vec![("post", "4254").into(), ("page", "3").into()]),
+    )
+    .await;
+    test_path_ext(
+      &root,
+      &Method::GET,
+      "/post/4254/page/3",
+      "/post/:post/page/:page",
+      "root-router",
+      Params(vec![("post", "4254").into(), ("page", "3").into()]),
+    )
+    .await;
+  }
+
+  fn add_path(node: &mut Node<'static, ReqHandler>, path: &'static str, response_header: &'static str) {
+    add_method_path(node, Method::GET, path, response_header)
+  }
+
+  fn add_method_path(
+    node: &mut Node<'static, ReqHandler>,
+    method: Method,
+    path: &'static str,
+    response_header: &'static str,
+  ) {
     debug!("adding path path={}", path);
-    node.insert(
-      Method::GET,
-      path[1..].into(),
-      Box::new(move |mut req: Request<Body>| {
+    node.insert(HandlerConfig {
+      method,
+      path: path.into(),
+      implicit_head: false,
+      add_slash: false,
+      value: Arc::new(move |mut req: Request<Body>| {
         let params = req.extensions_mut().get_mut::<Params>().unwrap();
         params.push(("path", path));
-        // req.extensions_mut().insert(params);
         Response::builder()
           .status(StatusCode::OK)
+          .header("X-Passed", response_header.to_string())
           .body(Body::from(path))
           .unwrap()
       }),
-    );
+    });
   }
 
   #[tokio::test]
   async fn test_tree() {
     std::env::set_var("RUST_LOG", "debug");
-    femme::try_with_level(femme::LevelFilter::Trace).ok();
 
     let mut root = Node::new();
-    add_path(&mut root, "/");
-    add_path(&mut root, "/i");
-    add_path(&mut root, "/i/:aaa");
-    add_path(&mut root, "/images");
-    add_path(&mut root, "/images/abc.jpg");
-    add_path(&mut root, "/images/:imgname");
-    add_path(&mut root, "/images/\\*path");
-    add_path(&mut root, "/images/\\*patch");
-    add_path(&mut root, "/images/*path");
-    add_path(&mut root, "/ima");
-    add_path(&mut root, "/ima/:par");
-    add_path(&mut root, "/images1");
-    add_path(&mut root, "/images2");
-    add_path(&mut root, "/apples");
-    add_path(&mut root, "/app/les");
-    add_path(&mut root, "/apples1");
-    add_path(&mut root, "/appeasement");
-    add_path(&mut root, "/appealing");
-    add_path(&mut root, "/date/\\:year/\\:month");
-    add_path(&mut root, "/date/:year/:month");
-    add_path(&mut root, "/date/:year/month");
-    add_path(&mut root, "/date/:year/:month/abc");
-    add_path(&mut root, "/date/:year/:month/:post");
-    add_path(&mut root, "/date/:year/:month/*post");
-    add_path(&mut root, "/:page");
-    add_path(&mut root, "/:page/:index");
-    add_path(&mut root, "/post/:post/page/:page");
-    add_path(&mut root, "/plaster");
-    add_path(&mut root, "/users/:pk/:related");
-    add_path(&mut root, "/users/:id/updatePassword");
-    add_path(&mut root, "/:something/abc");
-    add_path(&mut root, "/:something/def");
-    add_path(&mut root, "/apples/ab:cde/:fg/*hi");
-    add_path(&mut root, "/apples/ab*cde/:fg/*hi");
-    add_path(&mut root, "/apples/ab\\*cde/:fg/*hi");
-    add_path(&mut root, "/apples/ab*dde");
+    add_path(&mut root, "/", "root-router");
+    add_path(&mut root, "/i", "root-router");
+    add_path(&mut root, "/i/:aaa", "root-router");
+    add_path(&mut root, "/images", "root-router");
+    add_path(&mut root, "/images/abc.jpg", "root-router");
+    add_path(&mut root, "/images/:imgname", "root-router");
+    add_path(&mut root, "/images/\\*path", "root-router");
+    add_path(&mut root, "/images/\\*patch", "root-router");
+    add_path(&mut root, "/images/*path", "root-router");
+    add_path(&mut root, "/ima", "root-router");
+    add_path(&mut root, "/ima/:par", "root-router");
+    add_path(&mut root, "/images1", "root-router");
+    add_path(&mut root, "/images2", "root-router");
+    add_path(&mut root, "/apples", "root-router");
+    add_path(&mut root, "/app/les", "root-router");
+    add_path(&mut root, "/apples1", "root-router");
+    add_path(&mut root, "/appeasement", "root-router");
+    add_path(&mut root, "/appealing", "root-router");
+    add_path(&mut root, "/date/\\:year/\\:month", "root-router");
+    add_path(&mut root, "/date/:year/:month", "root-router");
+    add_path(&mut root, "/date/:year/month", "root-router");
+    add_path(&mut root, "/date/:year/:month/abc", "root-router");
+    add_path(&mut root, "/date/:year/:month/:post", "root-router");
+    add_path(&mut root, "/date/:year/:month/*post", "root-router");
+    add_path(&mut root, "/:page", "root-router");
+    add_path(&mut root, "/:page/:index", "root-router");
+    add_path(&mut root, "/post/:post/page/:page", "root-router");
+    add_path(&mut root, "/plaster", "root-router");
+    add_path(&mut root, "/users/:pk/:related", "root-router");
+    add_path(&mut root, "/users/:id/updatePassword", "root-router");
+    add_path(&mut root, "/:something/abc", "root-router");
+    add_path(&mut root, "/:something/def", "root-router");
+    add_path(&mut root, "/apples/ab:cde/:fg/*hi", "root-router");
+    add_path(&mut root, "/apples/ab*cde/:fg/*hi", "root-router");
+    add_path(&mut root, "/apples/ab\\*cde/:fg/*hi", "root-router");
+    add_path(&mut root, "/apples/ab*dde", "root-router");
 
     test_path(
       &root,
@@ -1040,14 +1361,23 @@ mod tests {
     test_path(&root, "//post/abc/page/2", "", Params::default()).await;
     test_path(&root, "//post//abc//page//2", "", Params::default()).await;
   }
-
   async fn test_path(
     node: &Node<'static, ReqHandler>,
     path: &'static str,
     expected_path: &'static str,
     expected_params: Params,
   ) {
-    let mtc = node.search(&Method::GET, &path[1..]);
+    test_path_ext(node, &Method::GET, path, expected_path, "root-router", expected_params).await
+  }
+  async fn test_path_ext(
+    node: &Node<'static, ReqHandler>,
+    method: &'static Method,
+    path: &'static str,
+    expected_path: &'static str,
+    expected_header: &'static str,
+    expected_params: Params,
+  ) {
+    let mtc = node.search(method, path);
     if !expected_path.is_empty() && mtc.is_err() {
       panic!(
         "No match for {}, expected {}\n{}",
@@ -1086,36 +1416,43 @@ mod tests {
       .body(Body::empty())
       .unwrap();
     let response = handler(req);
-    let matched_path = String::from_utf8(
-      async { hyper::body::to_bytes(response.into_body()).await }
-        .await
-        .unwrap()
-        .to_vec(),
-    )
-    .unwrap();
+    let actual_header = String::from_utf8(response.headers().get("X-Passed").unwrap().as_ref().to_vec()).unwrap();
+    let matched_path = String::from_utf8(hyper::body::to_bytes(response.into_body()).await.unwrap().to_vec()).unwrap();
 
-    if matched_path != expected_path {
-      panic!(
-        "Path {} matched {}, expected {}.\nNode and subtree was\n{}",
-        path,
-        matched_path,
-        expected_path,
-        node.dump_tree("", "")
-      )
-    }
+    assert_eq!(
+      matched_path,
+      expected_path,
+      "Path {} matched {}, expected {}.\nNode and subtree was\n{}",
+      path,
+      matched_path,
+      expected_path,
+      node.dump_tree("", "")
+    );
+
+    assert_eq!(
+      actual_header,
+      expected_header,
+      "header {} matched {}, expected {}.\nNode and subtree was\n{}",
+      path,
+      actual_header,
+      expected_header,
+      node.dump_tree("", "")
+    );
 
     if expected_params.is_empty() {
-      if !mtc.params.is_empty() {
-        panic!("Path {} expected no parameters, saw {:?}", path, mtc.params);
-      }
+      assert!(
+        mtc.params.is_empty(),
+        "Path {} expected no parameters, saw {:?}",
+        path,
+        mtc.params
+      );
     } else {
-      if expected_params.len() > mtc.params.len() {
-        panic!(
-          "Got {} params back but node specifies {}",
-          expected_params.len(),
-          mtc.params.len()
-        );
-      }
+      assert!(
+        expected_params.len() <= mtc.params.len(),
+        "Got {} params back but node specifies {}",
+        expected_params.len(),
+        mtc.params.len()
+      );
 
       let params = mtc.parameters;
       assert_eq!(expected_params, params, "expected_path={}", expected_path);

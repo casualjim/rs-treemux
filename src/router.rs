@@ -89,7 +89,7 @@
 //!  let third_value = &params[2].value; // the value of the 3rd parameter
 //! ```
 
-use crate::tree::{Error, Match, Node, Params};
+use crate::tree::{Error, HandlerConfig, Match, Node, Params};
 use hyper::{header, http, server::conn::AddrStream, Body, Method, Request, Response, StatusCode};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -122,14 +122,14 @@ impl RequestExt for Request<Body> {
   }
 }
 
-pub trait MiddlewareT: Send + Sync + 'static {
+pub trait Middleware: Send + Sync + 'static {
   type Input;
   type Output;
 
-  fn compose(&self, input: Self::Input) -> Self::Output;
+  fn chain(&self, input: Self::Input) -> Self::Output;
 }
 
-impl<F> MiddlewareT for F
+impl<F> Middleware for F
 where
   F: Fn(Handler) -> Handler + Send + Sync + 'static,
 {
@@ -137,7 +137,7 @@ where
 
   type Output = Handler;
 
-  fn compose(&self, input: Self::Input) -> Self::Output {
+  fn chain(&self, input: Self::Input) -> Self::Output {
     self(input)
   }
 }
@@ -145,36 +145,33 @@ where
 pub type Handler = Box<dyn Fn(Request<Body>) -> HandlerReturn + Send + Sync + 'static>;
 pub type HandlerReturn = Pin<Box<dyn Future<Output = Result<Response<Body>, hyper::http::Error>> + Send + 'static>>;
 
+#[derive(Clone)]
 struct Route {
-  handler: Handler,
+  pattern: String,
+  handler: Arc<Handler>,
 }
 
 impl std::fmt::Debug for Route {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Route")
+      .field("pattern", &self.pattern)
       .field("handler", &"{{closure}}".to_owned())
       .finish()
   }
 }
 
 impl Route {
-  fn new<H, R>(handler: H) -> Route
+  fn new<P, H, R>(pattern: P, handler: H) -> Route
   where
+    P: Into<String>,
     H: Fn(Request<Body>) -> R + Send + Sync + 'static,
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
     let handler: Handler = Box::new(move |req: Request<hyper::Body>| Box::pin(handler(req)));
-    Route { handler }
-  }
-}
-
-impl<H, R> From<H> for Route
-where
-  H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-  R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-{
-  fn from(handler: H) -> Self {
-    Route::new(handler)
+    Route {
+      pattern: pattern.into(),
+      handler: Arc::new(handler),
+    }
   }
 }
 
@@ -198,7 +195,7 @@ impl Service<Request<Body>> for Route {
 pub struct GroupBuilder<'a> {
   prefix: Cow<'a, str>,
   inner: &'a Builder,
-  chain: Arc<dyn MiddlewareT<Input = Handler, Output = Handler>>,
+  chain: Arc<dyn Middleware<Input = Handler, Output = Handler>>,
 }
 
 impl<'a> GroupBuilder<'a> {
@@ -208,7 +205,7 @@ impl<'a> GroupBuilder<'a> {
       .root
       .lock()
       .unwrap()
-      .add_node(self.prefix.to_string().into(), routes.into().root)
+      .extend(self.prefix.to_string().into(), routes.into().root)
   }
 
   pub fn scope<'b, P: Into<Cow<'static, str>>>(&'b mut self, path: P) -> GroupBuilder<'b> {
@@ -221,10 +218,10 @@ impl<'a> GroupBuilder<'a> {
 
   pub fn middleware<M>(&mut self, middleware: M)
   where
-    M: MiddlewareT<Input = Handler, Output = Handler>,
+    M: Middleware<Input = Handler, Output = Handler>,
   {
     let previous = self.chain.clone();
-    self.chain = Arc::new(move |handler| previous.compose(middleware.compose(handler)));
+    self.chain = Arc::new(move |handler| previous.chain(middleware.chain(handler)));
   }
 }
 
@@ -236,9 +233,9 @@ impl<'a> RouterBuilder for GroupBuilder<'a> {
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
     let mut root = self.inner.root.lock().unwrap();
-    let newp = format!("{}{}", self.prefix, path.into());
-    let req_handler = self.chain.clone().compose(Box::new(move |req| Box::pin(handler(req))));
-    root.insert(method, newp.into(), Route::new(req_handler))
+    let newp: Cow<str> = format!("{}{}", self.prefix, path.into()).into();
+    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
+    root.insert(HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler)));
   }
 }
 
@@ -267,7 +264,7 @@ async fn default_method_not_allowed(allow: Vec<Method>) -> Result<Response<Body>
 pub struct Builder {
   path: Cow<'static, str>,
   root: Arc<Mutex<Node<'static, Route>>>,
-  chain: Arc<dyn MiddlewareT<Input = Handler, Output = Handler>>,
+  chain: Arc<dyn Middleware<Input = Handler, Output = Handler>>,
   handle_not_found: Option<Route>,
   handle_method_not_allowed: Option<Route>,
   head_can_use_get: bool,
@@ -294,7 +291,7 @@ impl Default for Builder {
 
 impl Builder {
   pub fn extend<P: Into<Cow<'static, str>>, B: Into<Treemux>>(&self, path: P, routes: B) {
-    self.root.lock().unwrap().add_node(path.into(), routes.into().root)
+    self.root.lock().unwrap().extend(path.into(), routes.into().root)
   }
 
   pub fn scope<'b, P: Into<Cow<'b, str>>>(&'b mut self, path: P) -> GroupBuilder<'b> {
@@ -324,10 +321,10 @@ impl Builder {
 
   pub fn middleware<M>(&mut self, middleware: M)
   where
-    M: MiddlewareT<Input = Handler, Output = Handler>,
+    M: Middleware<Input = Handler, Output = Handler>,
   {
     let previous = self.chain.clone();
-    self.chain = Arc::new(move |handler| previous.compose(middleware.compose(handler)));
+    self.chain = Arc::new(move |handler| previous.chain(middleware.chain(handler)));
   }
 
   // /// Register a handler for when the path matches a different method than the requested one
@@ -364,9 +361,9 @@ impl RouterBuilder for Builder {
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
     let mut root = self.root.lock().unwrap();
-    let newp = format!("{}{}", self.path, path.into());
-    let req_handler = self.chain.clone().compose(Box::new(move |req| Box::pin(handler(req))));
-    root.insert(method, newp.into(), Route::new(req_handler))
+    let newp: Cow<str> = format!("{}{}", self.path, path.into()).into();
+    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
+    root.insert(HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler)))
   }
 }
 
@@ -466,12 +463,6 @@ impl Service<Request<Body>> for Treemux {
           (self.handle_method_not_allowed.as_ref().unwrap().handler)(req)
         }
       }
-      Err(Error::StatusCode(sc)) => Box::pin(async move {
-        Response::builder()
-          .status(sc)
-          .body(Body::from(format!("{}", sc)))
-          .map_err(Into::into)
-      }),
     }
   }
 }
@@ -581,7 +572,7 @@ where
     Poll::Ready(Ok(()))
   }
 
-  fn call(&mut self, conn: &AddrStream) -> Self::Future {
+  fn call(&mut self, _conn: &AddrStream) -> Self::Future {
     // let service = RouterService {
     //   app_context: self.0.clone(),
     //   router: &mut self.1,

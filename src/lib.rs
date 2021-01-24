@@ -201,6 +201,7 @@ extern crate kv_log_macro;
 
 pub(crate) mod path;
 mod tree;
+pub use tree::{Param, Params};
 
 #[doc(hidden)]
 pub mod router;
