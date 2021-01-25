@@ -313,7 +313,17 @@ impl Builder {
     H: Fn(Request<Body>, Vec<Method>) -> R + Send + Sync + 'static,
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
-    let req_handler: MethodNotAllowedHandler = Box::new(move |req, allowed| Box::pin(handler(req, allowed)));
+    let chain = self.chain.clone();
+
+    let handler = Arc::new(handler);
+    let req_handler: MethodNotAllowedHandler = Box::new(move |req, allowed| {
+      let handler = handler.clone();
+      Box::pin(chain
+        .clone()
+        .chain(Box::new(move |rr| Box::pin(handler(rr, allowed.clone()))))(
+        req
+      ))
+    });
     self.handle_method_not_allowed = Some(req_handler);
   }
 
