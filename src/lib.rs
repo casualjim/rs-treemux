@@ -28,10 +28,10 @@
 //! Here is a simple example:
 //!
 //! ```rust,no_run
-//! use treemux::{Treemux, Router, Params, Handler};
+//! use treemux::{Treemux, RouterBuilder, Params, Handler};
 //! use std::convert::Infallible;
 //! use hyper::{Request, Response, Body};
-//! use anyhow::Error;
+//! use hyper::http::Error;
 //!
 //! async fn index(_: Request<Body>) -> Result<Response<Body>, Error> {
 //!     Ok(Response::new("Hello, World!".into()))
@@ -39,12 +39,12 @@
 //!
 //! async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
 //!     let params = req.extensions().get::<Params>().unwrap();
-//!     Ok(Response::new(format!("Hello, {}", params.by_name("user").unwrap()).into()))
+//!     Ok(Response::new(format!("Hello, {}", params.get("user").unwrap()).into()))
 //! }
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut router: Treemux<_, _> = Treemux::default();
+//!     let mut router = Treemux::builder();
 //!     router.get("/", index);
 //!     router.get("/hello/:user", hello);
 //!
@@ -200,6 +200,7 @@
 extern crate kv_log_macro;
 
 pub(crate) mod path;
+mod serve;
 mod tree;
 pub use tree::{Param, Params};
 
@@ -208,6 +209,29 @@ pub mod router;
 
 #[doc(inline)]
 pub use router::{Handler, RouterBuilder, Treemux};
+
+/// RedirectBehavior sets the behavior when the router redirects the request to the
+/// canonical version of the requested URL using RedirectTrailingSlash or RedirectClean.
+/// The default behavior is to return a 301 status, redirecting the browser to the version
+/// of the URL that matches the given pattern.
+///
+/// On a POST request, most browsers that receive a 301 will submit a GET request to
+/// the redirected URL, meaning that any data will likely be lost. If you want to handle
+/// and avoid this behavior, you may use Redirect307, which causes most browsers to
+/// resubmit the request using the original method and request body.
+///
+/// Since 307 is supposed to be a temporary redirect, the new 308 status code has been
+/// proposed, which is treated the same, except it indicates correctly that the redirection
+/// is permanent. The big caveat here is that the RFC is relatively recent, and older
+/// browsers will not know what to do with it. Therefore its use is not recommended
+/// unless you really know what you're doing.
+///
+/// Finally, the UseHandler value will simply call the handler function for the pattern.
+pub enum RedirectBehavior {
+  Redirect301,
+  Redirect307,
+  Redirect308,
+}
 
 // // test the code examples in README.md
 #[cfg(doctest)]

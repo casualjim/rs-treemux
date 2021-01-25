@@ -10,7 +10,7 @@
 //! With the `hyper-server` feature enabled, the `Router` can be used as a router for a hyper server:
 //!
 //! ```rust,no_run
-//! use treemux::{Treemux, Router, Params};
+//! use treemux::{Treemux, RouterBuilder, Params};
 //! use std::convert::Infallible;
 //! use hyper::{Request, Response, Body};
 //! use hyper::http::Error;
@@ -21,12 +21,12 @@
 //!
 //! async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
 //!     let params = req.extensions().get::<Params>().unwrap();
-//!     Ok(Response::new(format!("Hello, {}", params.by_name("user").unwrap()).into()))
+//!     Ok(Response::new(format!("Hello, {}", params.get("user").unwrap()).into()))
 //! }
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut router = Treemux::default();
+//!     let mut router = Treemux::builder();
 //!     router.get("/", index);
 //!     router.get("/hello/:user", hello);
 //!
@@ -89,14 +89,15 @@
 //!  let third_value = &params[2].value; // the value of the 3rd parameter
 //! ```
 
-use crate::tree::{Error, HandlerConfig, Match, Node, Params};
-use hyper::{header, http, server::conn::AddrStream, Body, Method, Request, Response, StatusCode};
+use crate::{
+  serve::MakeRouterService,
+  tree::{Error, HandlerConfig, Node, Params},
+};
+use hyper::{header, http, Body, Method, Request, Response, StatusCode};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::{future::Future, net::SocketAddr};
 use std::{pin::Pin, str};
-use tower_service::Service;
 
 pub trait RequestExt {
   fn params(&self) -> Option<&Params>;
@@ -172,23 +173,6 @@ impl Route {
       pattern: pattern.into(),
       handler: Arc::new(handler),
     }
-  }
-}
-
-impl Service<Request<Body>> for Route {
-  type Response = Response<Body>;
-
-  type Error = http::Error;
-
-  #[allow(clippy::type_complexity)]
-  type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-  fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-    Poll::Ready(Ok(()))
-  }
-
-  fn call(&mut self, req: Request<Body>) -> Self::Future {
-    (&self.handler)(req)
   }
 }
 
@@ -302,23 +286,6 @@ impl Builder {
     }
   }
 
-  // pub fn middleware<M>(&mut self, middleware: M)
-  // where
-  //   M: Fn(Handler) -> Handler + Send + Sync + 'static,
-  // {
-  //   let previous = self.chain.take();
-  //   if previous.is_none() {
-  //     self.chain = Some(Box::new(middleware));
-  //     return;
-  //   }
-
-  //   let previous = previous.unwrap();
-  //   self.chain = Some(Box::new(move |handler| {
-  //     let rinner = middleware(handler);
-  //     previous(rinner)
-  //   }));
-  // }
-
   pub fn middleware<M>(&mut self, middleware: M)
   where
     M: Middleware<Input = Handler, Output = Handler>,
@@ -336,7 +303,7 @@ impl Builder {
   //   self.handle_global_options = Some(Box::new(move |req: Request<hyper::Body>| Box::new(handler(req))));
   // }
 
-  pub fn build(self) -> Treemux {
+  fn build(self) -> Treemux {
     let root = Arc::try_unwrap(self.root)
       .map_err(|_| ())
       .unwrap()
@@ -350,6 +317,54 @@ impl Builder {
     result.redirect_clean_path = self.redirect_clean_path;
     result.escape_added_routes = self.escape_added_routes;
     result
+  }
+
+  /// Converts the `Treemux` into a `Service` which you can serve directly with `Hyper`.
+  /// If you have an existing `Service` that you want to incorporate a `Treemux` into, see
+  /// [`Treemux::serve`](crate::Treemux::serve).
+  /// ```rust,no_run
+  /// # use treemux::{Treemux, RouterBuilder};
+  /// # use std::convert::Infallible;
+  /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+  /// // Our router...
+  /// let router = Treemux::builder();
+  ///
+  /// // Convert it into a service...
+  /// let service = router.into_service();
+  ///
+  /// // Serve with hyper
+  /// hyper::Server::bind(&([127, 0, 0, 1], 3030).into())
+  ///     .serve(service)
+  ///     .await?;
+  /// # Ok(())
+  /// # }
+  /// ```
+  pub fn into_service_with_context<T: Send + Sync + 'static>(self, context: T) -> MakeRouterService<T> {
+    MakeRouterService(Arc::new(context), self.build())
+  }
+
+  /// Converts the `Treemux` into a `Service` which you can serve directly with `Hyper`.
+  /// If you have an existing `Service` that you want to incorporate a `Treemux` into, see
+  /// [`Treemux::serve`](crate::Treemux::serve).
+  /// ```rust,no_run
+  /// # use treemux::{Treemux, RouterBuilder};
+  /// # use std::convert::Infallible;
+  /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+  /// // Our router...
+  /// let router = Treemux::builder();
+  ///
+  /// // Convert it into a service...
+  /// let service = router.into_service();
+  ///
+  /// // Serve with hyper
+  /// hyper::Server::bind(&([127, 0, 0, 1], 3030).into())
+  ///     .serve(service)
+  ///     .await?;
+  /// # Ok(())
+  /// # }
+  /// ```
+  pub fn into_service(self) -> MakeRouterService<()> {
+    MakeRouterService(Arc::new(()), self.build())
   }
 }
 
@@ -398,13 +413,121 @@ impl Treemux {
   /// router.get("/home", |_| {
   ///     async { Ok(Response::new(Body::from("Welcome!"))) }
   /// });
-  /// let router = router.build();
+  /// let router: Treemux = router.into();
   ///
   /// let res = router.lookup(&Method::GET, "/home").unwrap();
-  /// assert!(res.parameters().is_empty());
+  /// assert!(res.1.is_empty());
   /// ```
-  fn lookup<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<Match<'b, Route>, bool> {
-    self.root.search(method, path).map_err(|_| false)
+  pub fn lookup<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<(Arc<Handler>, Params), bool> {
+    self.root.search(method, path).map_err(|_| false).map(|m| {
+      let vv = m.value.unwrap();
+      (vv.handler.clone(), m.parameters.clone())
+    })
+  }
+
+  /// Converts the `Treemux` into a `Service` which you can serve directly with `Hyper`.
+  /// If you have an existing `Service` that you want to incorporate a `Treemux` into, see
+  /// [`Treemux::serve`](crate::Treemux::serve).
+  /// ```rust,no_run
+  /// # use treemux::{Treemux, RouterBuilder};
+  /// # use std::convert::Infallible;
+  /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+  /// // Our router...
+  /// let router = Treemux::builder();
+  ///
+  /// // Convert it into a service...
+  /// let service = router.into_service();
+  ///
+  /// // Serve with hyper
+  /// hyper::Server::bind(&([127, 0, 0, 1], 3030).into())
+  ///     .serve(service)
+  ///     .await?;
+  /// # Ok(())
+  /// # }
+  /// ```
+  pub fn into_service_with_context<T: Send + Sync + 'static>(self, context: T) -> MakeRouterService<T> {
+    MakeRouterService(Arc::new(context), self)
+  }
+
+  /// Converts the `Treemux` into a `Service` which you can serve directly with `Hyper`.
+  /// If you have an existing `Service` that you want to incorporate a `Treemux` into, see
+  /// [`Treemux::serve`](crate::Treemux::serve).
+  /// ```rust,no_run
+  /// # use treemux::{Treemux, RouterBuilder};
+  /// # use std::convert::Infallible;
+  /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+  /// // Our router...
+  /// let router = Treemux::builder();
+  ///
+  /// // Convert it into a service...
+  /// let service = router.into_service();
+  ///
+  /// // Serve with hyper
+  /// hyper::Server::bind(&([127, 0, 0, 1], 3030).into())
+  ///     .serve(service)
+  ///     .await?;
+  /// # Ok(())
+  /// # }
+  /// ```
+  pub fn into_service(self) -> MakeRouterService<()> {
+    MakeRouterService(Arc::new(()), self)
+  }
+
+  /// An asynchronous function from a `Request` to a `Response`. You will generally not need to use
+  /// this function directly, and instead use
+  /// [`Treemux::into_service`](crate::Treemux::into_service). However, it may be useful when
+  /// incorporating the router into a larger service.
+  /// ```rust,no_run
+  /// # use treemux::{Treemux, RouterBuilder};
+  /// # use hyper::service::{make_service_fn, service_fn};
+  /// # use hyper::{Request, Body, Server};
+  /// # use std::convert::Infallible;
+  /// # use std::sync::Arc;
+  ///
+  /// # async fn run() {
+  /// let mut router = Treemux::builder();
+  ///
+  /// let router: Arc<Treemux> = Arc::new(router.into());
+  ///
+  /// let make_svc = make_service_fn(move |_| {
+  ///     let router = router.clone();
+  ///     async move {
+  ///         Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+  ///             let router = router.clone();
+  ///             async move { router.serve(req).await }
+  ///         }))
+  ///     }
+  /// });
+  ///
+  /// let server = Server::bind(&([127, 0, 0, 1], 3000).into())
+  ///     .serve(make_svc)
+  ///     .await;
+  /// # }
+  /// ```
+  pub async fn serve(&self, mut req: Request<Body>) -> Result<Response<Body>, http::Error> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    match self.root.search(&method, path) {
+      Ok(mtc) => {
+        req.extensions_mut().insert(mtc.parameters);
+        (mtc.value.unwrap().handler)(req).await
+      }
+      Err(Error::NotFound(_)) => {
+        if self.handle_not_found.is_none() {
+          default_not_found().await
+        } else {
+          (self.handle_not_found.as_ref().unwrap().handler)(req).await
+        }
+      }
+      Err(Error::MethodNotAllowed(_, allowed)) => {
+        if self.handle_not_found.is_none() {
+          default_method_not_allowed(allowed).await
+        } else {
+          (self.handle_method_not_allowed.as_ref().unwrap().handler)(req).await
+        }
+      }
+    }
   }
 }
 
@@ -428,44 +551,6 @@ impl From<Builder> for Treemux {
   }
 }
 
-impl Service<Request<Body>> for Treemux {
-  type Response = Response<Body>;
-
-  type Error = http::Error;
-
-  #[allow(clippy::type_complexity)]
-  type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-  fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-    Poll::Ready(Ok(()))
-  }
-
-  fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-    let r = self.root.search(&method, path);
-    match r {
-      Ok(mtc) => {
-        req.extensions_mut().insert(mtc.parameters);
-        Box::pin((mtc.value.unwrap().handler)(req))
-      }
-      Err(Error::NotFound(_)) => {
-        if self.handle_not_found.is_none() {
-          Box::pin(default_not_found())
-        } else {
-          (self.handle_not_found.as_ref().unwrap().handler)(req)
-        }
-      }
-      Err(Error::MethodNotAllowed(_, allowed)) => {
-        if self.handle_not_found.is_none() {
-          Box::pin(default_method_not_allowed(allowed))
-        } else {
-          (self.handle_method_not_allowed.as_ref().unwrap().handler)(req)
-        }
-      }
-    }
-  }
-}
 pub trait RouterBuilder {
   /// Insert a value into the router for a specific path indexed by a key.
   /// ```rust
@@ -476,7 +561,7 @@ pub trait RouterBuilder {
   /// router.handle(Method::GET, "/teapot", |_: Request<Body>| {
   ///     async { Ok(Response::new(Body::from("I am a teapot!"))) }
   /// });
-  /// let router = router.build();
+  /// let router: Treemux = router.into();
   /// ```
   fn handle<P, H, R>(&self, method: Method, path: P, handler: H)
   where
@@ -555,156 +640,11 @@ pub trait RouterBuilder {
   }
 }
 
-#[doc(hidden)]
-pub struct MakeRouterService<T: Send + Sync + 'static>(Arc<T>, Arc<Treemux>);
-
-impl<T> Service<&AddrStream> for MakeRouterService<T>
-where
-  T: Send + Sync + 'static,
-{
-  type Response = Arc<Treemux>;
-  type Error = anyhow::Error;
-
-  #[allow(clippy::type_complexity)]
-  type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
-
-  fn poll_ready(&mut self, _: &mut Context) -> Poll<Result<(), Self::Error>> {
-    Poll::Ready(Ok(()))
-  }
-
-  fn call(&mut self, _conn: &AddrStream) -> Self::Future {
-    // let service = RouterService {
-    //   app_context: self.0.clone(),
-    //   router: &mut self.1,
-    //   remote_addr: conn.remote_addr(),
-    // };
-
-    let service = self.1.clone();
-    let fut = async move { Ok(service) };
-    Box::pin(fut)
-  }
-}
-
-// #[derive(Clone)]
-// #[doc(hidden)]
-// pub struct RouterService<T>
-// where
-//   T: Send + Sync + 'static,
-// {
-//   router: *mut Router,
-//   app_context: Arc<T>,
-//   remote_addr: SocketAddr,
-// }
-
-// impl<T> Service<Request<Body>> for RouterService<T>
-// where
-//   T: Send + Sync + 'static,
-// {
-//   type Response = Response<Body>;
-//   type Error = anyhow::Error;
-//   #[allow(clippy::type_complexity)]
-//   type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
-
-//   fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-//     Poll::Ready(Ok(()))
-//   }
-
-//   fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-//     let router = unsafe { &mut *self.router };
-//     req.extensions_mut().insert(self.app_context.clone());
-//     req.extensions_mut().insert(self.remote_addr);
-//     let fut = router.serve(req);
-//     Box::pin(fut)
-//   }
-// }
-
-// unsafe impl<T: Send + Sync + 'static> Send for RouterService<T> {}
-// unsafe impl<T: Send + Sync + 'static> Sync for RouterService<T> {}
-
 // impl<'a> Router<'a> {
 //   pub fn new() -> Self {
 //     Router::default()
 //   }
 
-// /// Converts the `Router` into a `Service` which you can serve directly with `Hyper`.
-// /// If you have an existing `Service` that you want to incorporate a `Router` into, see
-// /// [`Router::serve`](crate::Router::serve).
-// /// ```rust,no_run
-// /// # use treemux::Router;
-// /// # use std::convert::Infallible;
-// /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-// /// // Our router...
-// /// let router = Router::default();
-// ///
-// /// // Convert it into a service...
-// /// let service = router.into_service();
-// ///
-// /// // Serve with hyper
-// /// hyper::Server::bind(&([127, 0, 0, 1], 3030).into())
-// ///     .serve(service)
-// ///     .await?;
-// /// # Ok(())
-// /// # }
-// /// ```
-// pub fn into_service_with_context<T: Send + Sync + 'static>(self, context: T) -> MakeRouterService<T> {
-//   MakeRouterService(Arc::new(context), self)
-// }
-
-// /// Converts the `Router` into a `Service` which you can serve directly with `Hyper`.
-// /// If you have an existing `Service` that you want to incorporate a `Router` into, see
-// /// [`Router::serve`](crate::Router::serve).
-// /// ```rust,no_run
-// /// # use treemux::Router;
-// /// # use std::convert::Infallible;
-// /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-// /// // Our router...
-// /// let router = Router::default();
-// ///
-// /// // Convert it into a service...
-// /// let service = router.into_service();
-// ///
-// /// // Serve with hyper
-// /// hyper::Server::bind(&([127, 0, 0, 1], 3030).into())
-// ///     .serve(service)
-// ///     .await?;
-// /// # Ok(())
-// /// # }
-// /// ```
-// pub fn into_service(self) -> MakeRouterService<()> {
-//   MakeRouterService(Arc::new(()), self)
-// }
-
-// /// An asynchronous function from a `Request` to a `Response`. You will generally not need to use
-// /// this function directly, and instead use
-// /// [`Router::into_service`](crate::Router::into_service). However, it may be useful when
-// /// incorporating the router into a larger service.
-// /// ```rust,no_run
-// /// # use treemux::Router;
-// /// # use hyper::service::{make_service_fn, service_fn};
-// /// # use hyper::{Request, Body, Server};
-// /// # use std::convert::Infallible;
-// /// # use std::sync::Arc;
-// ///
-// /// # async fn run() {
-// /// let mut router: Router = Router::default();
-// ///
-// /// let router = Arc::new(router);
-// ///
-// /// let make_svc = make_service_fn(move |_| {
-// ///     let router = router.clone();
-// ///     async move {
-// ///         Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-// ///             let router = router.clone();
-// ///             async move { router.serve(req).await }
-// ///         }))
-// ///     }
-// /// });
-// ///
-// /// let server = Server::bind(&([127, 0, 0, 1], 3000).into())
-// ///     .serve(make_svc)
-// ///     .await;
-// /// # }
-// /// ```
 // pub async fn serve(&mut self, mut req: Request<Body>) -> Result<Response<Body>> {
 //   let root = self.root.search(req.method(), req.uri().path());
 //   // let path = req.uri().path();
@@ -811,7 +751,6 @@ mod tests {
 
   use futures::prelude::*;
   use hyper::{http, Body, Request, Response};
-  use tower_service::Service;
 
   use crate::{Handler, Treemux};
 
@@ -836,21 +775,21 @@ mod tests {
     scp.get("/hello", nested_world);
     scp.post("/hello", nested_world);
 
-    let mut tm: Treemux = b.into();
+    let tm: Treemux = b.into();
 
     let resp = tm
-      .call(Request::builder().uri("/hello").body(Body::empty()).unwrap())
+      .serve(Request::builder().uri("/hello").body(Body::empty()).unwrap())
       .await
       .unwrap();
     info!("/hello: {:?}", resp);
     let resp = tm
-      .call(Request::builder().uri("/other").body(Body::empty()).unwrap())
+      .serve(Request::builder().uri("/other").body(Body::empty()).unwrap())
       .await
       .unwrap();
     info!("/other: {:?}", resp);
 
     let resp = tm
-      .call(
+      .serve(
         Request::builder()
           .uri("/apps/kohana/user/hello")
           .body(Body::empty())

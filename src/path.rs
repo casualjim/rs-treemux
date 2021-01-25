@@ -12,7 +12,7 @@
 /// If the result of this process is an empty string, "/" is returned
 pub fn clean(p: &str) -> String {
   // Turn empty string into "/"
-  if p == "" {
+  if p.is_empty() {
     return "/".to_string();
   }
 
