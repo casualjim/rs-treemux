@@ -6,7 +6,7 @@ use hyper::{
 };
 use hyper::{Body, Request, Server};
 use log::info;
-use treemux::{middlewares, Handler, RouterBuilder, Treemux};
+use treemux::{middlewares, RouterBuilder, Treemux};
 
 async fn todos(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
   Response::builder()

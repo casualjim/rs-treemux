@@ -92,10 +92,11 @@
 use crate::{
   serve::MakeRouterService,
   tree::{Error, HandlerConfig, Node, Params},
+  RedirectBehavior,
 };
 use hyper::{header, http, Body, Method, Request, Response, StatusCode};
-use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
+use std::{borrow::Cow, collections::HashMap};
 use std::{future::Future, net::SocketAddr};
 use std::{pin::Pin, str};
 
@@ -253,10 +254,30 @@ pub struct Builder {
   handle_not_found: Option<Handler>,
   handle_method_not_allowed: Option<MethodNotAllowedHandler>,
   handle_global_options: Option<Handler>,
-  head_can_use_get: bool,
-  redirect_trailing_slash: bool,
-  redirect_clean_path: bool,
-  escape_added_routes: bool,
+  /// Allows the router to use the `GET` handler to respond to
+  /// `HEAD` requests if no explicit `HEAD` handler has been added for the
+  /// matching pattern. This is true by default.
+  pub head_can_use_get: bool,
+
+  /// Enables automatic redirection in case the router doesn't find a matching route
+  /// for the current request path but a handler for the path with or without the trailing
+  /// slash exists. This is true by default.
+  pub redirect_trailing_slash: bool,
+
+  /// Allows the router to try clean the current request path,
+  /// if no handler is registered for it.This is true by default.
+  pub redirect_clean_path: bool,
+  /// Sets the default redirect behavior when RedirectTrailingSlash or
+  /// RedirectCleanPath are true. The default value is `Redirect301`.
+  pub redirect_behavior: RedirectBehavior,
+
+  /// Overrides the default behavior for a particular HTTP method.
+  /// The key is the method name, and the value is the behavior to use for that method.
+  pub redirect_method_behavior: HashMap<Method, RedirectBehavior>,
+
+  /// Removes the trailing slash when a catch-all pattern
+  /// is matched, if set to true. By default, catch-all paths are never redirected.
+  pub remove_catach_all_trailing_slash: bool,
 }
 
 impl Default for Builder {
@@ -271,7 +292,9 @@ impl Default for Builder {
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
-      escape_added_routes: false,
+      redirect_behavior: RedirectBehavior::Redirect301,
+      redirect_method_behavior: HashMap::default(),
+      remove_catach_all_trailing_slash: false,
     }
   }
 }
@@ -314,7 +337,6 @@ impl Builder {
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
     let chain = self.chain.clone();
-
     let handler = Arc::new(handler);
     let req_handler: MethodNotAllowedHandler = Box::new(move |req, allowed| {
       let handler = handler.clone();
@@ -350,7 +372,9 @@ impl Builder {
     result.head_can_use_get = self.head_can_use_get;
     result.redirect_trailing_slash = self.redirect_trailing_slash;
     result.redirect_clean_path = self.redirect_clean_path;
-    result.escape_added_routes = self.escape_added_routes;
+    result.redirect_behavior = self.redirect_behavior;
+    result.redirect_method_behavior = self.redirect_method_behavior;
+    result.remove_catach_all_trailing_slash = self.remove_catach_all_trailing_slash;
     result
   }
 
@@ -403,6 +427,12 @@ impl Builder {
   }
 }
 
+pub fn check_path(path: Cow<str>) {
+  if !path.starts_with('/') {
+    panic!("Path {} must start with a slash", path);
+  }
+}
+
 impl RouterBuilder for Builder {
   fn handle<P, H, R>(&self, method: Method, path: P, handler: H)
   where
@@ -411,9 +441,23 @@ impl RouterBuilder for Builder {
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
     let mut root = self.root.lock().unwrap();
-    let newp: Cow<str> = format!("{}{}", self.path, path.into()).into();
+
+    let path: Cow<str> = path.into().into();
+    check_path(path.clone());
+    let newp: Cow<str> = format!("{}{}", self.path, path).into();
+    if newp.is_empty() {
+      panic!("Cannot map an empty path");
+    }
+
+    let (add_slash, newp) = if newp.len() > 1 && newp.ends_with('/') && self.redirect_trailing_slash {
+      (true, newp.strip_suffix('/').unwrap_or_default().to_string().into())
+    } else {
+      (false, newp)
+    };
     let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    root.insert(HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler)))
+    let mut hcfg = HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler));
+    hcfg.add_slash = add_slash;
+    root.insert(hcfg)
   }
 }
 
@@ -425,7 +469,9 @@ pub struct Treemux {
   head_can_use_get: bool,
   redirect_trailing_slash: bool,
   redirect_clean_path: bool,
-  escape_added_routes: bool,
+  redirect_behavior: RedirectBehavior,
+  redirect_method_behavior: HashMap<Method, RedirectBehavior>,
+  remove_catach_all_trailing_slash: bool,
 }
 impl Treemux {
   fn new(root: Node<'static, Route>) -> Self {
@@ -577,7 +623,9 @@ impl Default for Treemux {
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
-      escape_added_routes: false,
+      redirect_behavior: RedirectBehavior::Redirect301,
+      redirect_method_behavior: HashMap::default(),
+      remove_catach_all_trailing_slash: false,
     }
   }
 }

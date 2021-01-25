@@ -5,7 +5,7 @@ use hyper::{header::HeaderValue, http, Body, Request, Response};
 
 use crate::Handler;
 
-pub fn log_requests<H, R>(f: H) -> Handler
+pub fn log_requests<H, R>(next: H) -> Handler
 where
   H: Fn(Request<Body>) -> R + Send + Sync + 'static,
   R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
@@ -21,8 +21,7 @@ where
     //   body: log::kv::value::Value::from_debug(req.body()),
     // });
 
-    let fut = f(req);
-
+    let fut = next(req);
     Box::pin(async move {
       let result = fut.await;
       let took = SystemTime::now().duration_since(start).unwrap();

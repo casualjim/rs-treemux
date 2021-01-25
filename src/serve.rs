@@ -12,6 +12,7 @@ use hyper::{http, service::Service};
 use hyper::{server::conn::AddrStream, Body, Request, Response};
 #[cfg(feature = "native-tls")]
 use hyper_tls::TlsStream;
+#[cfg(any(feature = "native-tls", feature = "rustls"))]
 use tokio::net::TcpStream;
 #[cfg(feature = "rustls")]
 use tokio_rustls::TlsStream as RustlsStream;

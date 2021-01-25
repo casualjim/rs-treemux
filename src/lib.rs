@@ -90,7 +90,7 @@
 //! ```rust
 //! use treemux::{Treemux, Handler};
 //! use hyper::{Request, Response, Body};
-//! use anyhow::Error;
+//! use hyper::http::Error;
 //!
 //! async fn global_options(_: Request<Body>) -> Result<Response<Body>, Error> {
 //!     Ok(Response::builder()
@@ -101,7 +101,7 @@
 //! }
 //!
 //! fn main() {
-//!   let mut router: Treemux = Treemux::default();
+//!   let mut router = Treemux::builder();
 //!   router.global_options(global_options);
 //! }
 //! ```
@@ -111,18 +111,17 @@
 //! Here is a quick example: Does your server serve multiple domains / hosts? You want to use sub-domains? Define a router per host!
 //!
 //! ```rust,no_run
-//! use treemux::{Handler, Treemux, Route};
-//! use treemux::router::RouterService;
+//! use treemux::{Handler, Treemux, RouterBuilder};
 //! use hyper::service::{make_service_fn, service_fn};
 //! use hyper::{Body, Request, Response, Server, StatusCode};
 //! use std::collections::HashMap;
 //! use std::convert::Infallible;
 //! use std::sync::Arc;
 //!
-//! pub struct HostSwitch(HashMap<String, Treemux<Route>>);
+//! pub struct HostSwitch(HashMap<String, Treemux>);
 //!
 //! impl HostSwitch {
-//!     async fn serve(&self, req: Request<Body>) -> anyhow::Result<Response<Body>> {
+//!     async fn serve(&self, req: Request<Body>) -> Result<Response<Body>, hyper::http::Error> {
 //!         let forbidden = Response::builder()
 //!             .status(StatusCode::FORBIDDEN)
 //!             .body(Body::empty())
@@ -137,17 +136,17 @@
 //!     }
 //! }
 //!
-//! async fn hello(_: Request<Body>) -> anyhow::Result<Response<Body>> {
+//! async fn hello(_: Request<Body>) -> Result<Response<Body>, hyper::http::Error> {
 //!     Ok(Response::new(Body::default()))
 //! }
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut router: Router = Router::default();
+//!     let mut router = Treemux::builder();
 //!     router.get("/", hello);
 //!
 //!     let mut host_switch: HostSwitch = HostSwitch(HashMap::new());
-//!     host_switch.0.insert("example.com:12345".into(), router);
+//!     host_switch.0.insert("example.com:12345".into(), router.into());
 //!
 //!     let host_switch = Arc::new(host_switch);
 //!
@@ -176,10 +175,10 @@
 //! The `not_found` handler can for example be used to return a 404 page:
 //!
 //! ```rust
-//! use treemux::{Treemux, Handler};
+//! use treemux::{Treemux, Handler, RouterBuilder};
 //! use hyper::{Request, Response, Body};
 //!
-//! let mut router: Treemux = Treemux::default();
+//! let mut router = Treemux::builder();
 //! router.not_found(|_| async {
 //!     Ok(Response::builder()
 //!         .status(400)
