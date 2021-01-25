@@ -31,7 +31,8 @@ Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/
 Here is a simple example:
 
 ```rust,no_run
-use treemux::{Treemux, RouterBuilder, Chain, Params};
+use treemux::{Treemux, RouterBuilder, Params};
+use treemux::middlewares;
 use std::convert::Infallible;
 use hyper::{Request, Response, Body};
 use anyhow::Error;
@@ -48,11 +49,12 @@ async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
 #[tokio::main]
 async fn main() {
   let mut router = Treemux::builder();
+  router.middleware(middlewares::log_requests);
   router.get("/", index);
   router.get("/hello/:user", hello);
 
   hyper::Server::bind(&([127, 0, 0, 1], 3000).into())
-    .serve(Chain::new().log_requests().service(router.build()))
+    .serve(router.into_service())
     .await;
 }
 ```
@@ -172,7 +174,7 @@ async fn main() {
 
 ### Not Found Handler
 
-**NOTE: It might be required to set [`Router::method_not_allowed`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.method_not_allowed) to `None` to avoid problems.**
+**NOTE: It might be required to set [`Router::method_not_allowed`](https://docs.rs/treemux/newest/treemux/router/struct.Treemux.html#structfield.handle_method_not_allowed) to `None` to avoid problems.**
 
 You can use another handler, to handle requests which could not be matched by this router by using the [`Router::not_found`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.not_found) handler.
 
@@ -183,15 +185,15 @@ use treemux::Treemux;
 use hyper::{Request, Response, Body};
 use anyhow::Error;
 
-async fn not_found(req: Request<Body>) -> Result<Response<Body>, Error> {
-  Ok(Response::builder()
-    .status(400)
+fn not_found() -> Response<Body> {
+  Response::builder()
+    .status(404)
     .body(Body::empty())
-    .unwrap()) 
+    .unwrap()
 }
 
 fn main() {
-  let mut router: Treemux = Treemux::default();
+  let mut router: Treemux = Treemux::builder();
   router.not_found(not_found);
 }
 ```

@@ -1,59 +1,49 @@
 use anyhow::Result;
 use femme::LevelFilter;
-use futures::Future;
-use hyper::{header::CONTENT_TYPE, http, Response, StatusCode};
+use hyper::{
+  header::{ALLOW, CONTENT_TYPE},
+  http, Method, Response, StatusCode,
+};
 use hyper::{Body, Request, Server};
-use kv_log_macro::{debug, error, info};
-use std::time::SystemTime;
-use treemux::{Handler, RouterBuilder, Treemux};
-
-fn log_requests<H, R>(f: H) -> Handler
-where
-  H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-  R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-{
-  Box::new(move |req: Request<Body>| {
-    let start = SystemTime::now();
-    debug!("Received request", {
-      method: req.method().as_str(),
-      path: req.uri().path_and_query().unwrap().as_str(),
-      headers: log::kv::value::Value::from_debug(req.headers()),
-      body: log::kv::value::Value::from_debug(req.body()),
-    });
-
-    let fut = f(req);
-
-    Box::pin(async move {
-      let result = fut.await;
-      let took = SystemTime::now().duration_since(start).unwrap();
-      match result {
-        Ok(resp) => {
-          info!(
-            "Finished processing request", {
-              took: log::kv::value::Value::from_debug(&took),
-              status_code: resp.status().as_u16(),
-              headers: log::kv::value::Value::from_debug(resp.headers()),
-              body: log::kv::value::Value::from_debug(resp.body()),
-            }
-          );
-          Ok(resp)
-        }
-        Err(e) => {
-          error!("{}", e);
-          Err(e)
-        }
-      }
-    })
-  })
-}
+use log::info;
+use treemux::{middlewares, Handler, RouterBuilder, Treemux};
 
 async fn todos(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
   Response::builder()
     .status(StatusCode::OK)
-    .header(CONTENT_TYPE, "application/json")
+    .header(CONTENT_TYPE, "application/json; charset=utf-8")
     .body(Body::from(
       r#"[{"content":"the first task"}, {"content":"the first done task","done":true}]"#,
     ))
+}
+
+async fn not_found(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
+  Ok(
+    Response::builder()
+      .status(StatusCode::NOT_FOUND)
+      .header(CONTENT_TYPE, "application/json; charset=utf-8")
+      .body(Body::from(r#"{"message":"Not found"}"#))
+      .unwrap(),
+  )
+}
+
+async fn method_not_allowed(_req: Request<Body>, allowed: Vec<Method>) -> Result<Response<Body>, http::Error> {
+  let allowed_methods = allowed
+    .iter()
+    .map(|v| v.as_str().to_string())
+    .collect::<Vec<String>>()
+    .join(", ");
+  Ok(
+    Response::builder()
+      .status(StatusCode::METHOD_NOT_ALLOWED)
+      .header(CONTENT_TYPE, "application/json; charset=utf-8")
+      .header(ALLOW, &allowed_methods)
+      .body(Body::from(format!(
+        r#"{{"message":"Method not allowed, try {}"}}"#,
+        allowed_methods
+      )))
+      .unwrap(),
+  )
 }
 
 #[tokio::main]
@@ -61,7 +51,20 @@ async fn main() -> Result<()> {
   femme::with_level(LevelFilter::Debug);
   let mut router = Treemux::builder();
 
-  router.middleware(log_requests);
+  router.middleware(middlewares::log_requests);
+
+  router.not_found(not_found);
+  router.method_not_allowed(method_not_allowed);
+
+  router.get("/about", |req| async move {
+    info!("{:?}", req);
+    Response::builder()
+      .status(StatusCode::OK)
+      .header(CONTENT_TYPE, "application/json; charset=utf-8")
+      .body(Body::from(
+        r#"[{"content":"the first task"}, {"content":"the first done task","done":true}]"#,
+      ))
+  });
   router.get("/todos", todos);
 
   Server::bind(&([127, 0, 0, 1], 3000).into())

@@ -199,6 +199,7 @@
 #[macro_use]
 extern crate kv_log_macro;
 
+pub mod middlewares;
 pub(crate) mod path;
 mod serve;
 mod tree;

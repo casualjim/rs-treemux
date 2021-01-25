@@ -144,7 +144,8 @@ where
 }
 
 pub type Handler = Box<dyn Fn(Request<Body>) -> HandlerReturn + Send + Sync + 'static>;
-pub type HandlerReturn = Pin<Box<dyn Future<Output = Result<Response<Body>, hyper::http::Error>> + Send + 'static>>;
+pub type HandlerReturn = Pin<Box<dyn Future<Output = Result<Response<Body>, http::Error>> + Send + 'static>>;
+pub type MethodNotAllowedHandler = Box<dyn Fn(Request<Body>, Vec<Method>) -> HandlerReturn + Send + Sync + 'static>;
 
 #[derive(Clone)]
 struct Route {
@@ -249,8 +250,9 @@ pub struct Builder {
   path: Cow<'static, str>,
   root: Arc<Mutex<Node<'static, Route>>>,
   chain: Arc<dyn Middleware<Input = Handler, Output = Handler>>,
-  handle_not_found: Option<Route>,
-  handle_method_not_allowed: Option<Route>,
+  handle_not_found: Option<Handler>,
+  handle_method_not_allowed: Option<MethodNotAllowedHandler>,
+  handle_global_options: Option<Handler>,
   head_can_use_get: bool,
   redirect_trailing_slash: bool,
   redirect_clean_path: bool,
@@ -265,6 +267,7 @@ impl Default for Builder {
       chain: Arc::new(|handler| handler),
       handle_not_found: None,
       handle_method_not_allowed: None,
+      handle_global_options: None,
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
@@ -294,14 +297,35 @@ impl Builder {
     self.chain = Arc::new(move |handler| previous.chain(middleware.chain(handler)));
   }
 
-  // /// Register a handler for when the path matches a different method than the requested one
-  // fn global_options<H, R>(&mut self, handler: H)
-  // where
-  //   H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-  //   R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  // {
-  //   self.handle_global_options = Some(Box::new(move |req: Request<hyper::Body>| Box::new(handler(req))));
-  // }
+  /// Register a handler for when there is no match
+  pub fn not_found<H, R>(&mut self, handler: H)
+  where
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+  {
+    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
+    self.handle_not_found = Some(req_handler);
+  }
+
+  /// Register a handler for when the path matches a different method than the requested one
+  pub fn method_not_allowed<H, R>(&mut self, handler: H)
+  where
+    H: Fn(Request<Body>, Vec<Method>) -> R + Send + Sync + 'static,
+    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+  {
+    let req_handler: MethodNotAllowedHandler = Box::new(move |req, allowed| Box::pin(handler(req, allowed)));
+    self.handle_method_not_allowed = Some(req_handler);
+  }
+
+  /// Register a handler for when the path matches a different method than the requested one
+  pub fn global_options<H, R>(&mut self, handler: H)
+  where
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+  {
+    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
+    self.handle_global_options = Some(req_handler);
+  }
 
   fn build(self) -> Treemux {
     let root = Arc::try_unwrap(self.root)
@@ -312,6 +336,7 @@ impl Builder {
     let mut result = Treemux::new(root);
     result.handle_not_found = self.handle_not_found;
     result.handle_method_not_allowed = self.handle_method_not_allowed;
+    result.handle_global_options = self.handle_global_options;
     result.head_can_use_get = self.head_can_use_get;
     result.redirect_trailing_slash = self.redirect_trailing_slash;
     result.redirect_clean_path = self.redirect_clean_path;
@@ -384,8 +409,9 @@ impl RouterBuilder for Builder {
 
 pub struct Treemux {
   root: Node<'static, Route>,
-  handle_not_found: Option<Route>,
-  handle_method_not_allowed: Option<Route>,
+  handle_not_found: Option<Handler>,
+  handle_method_not_allowed: Option<MethodNotAllowedHandler>,
+  handle_global_options: Option<Handler>,
   head_can_use_get: bool,
   redirect_trailing_slash: bool,
   redirect_clean_path: bool,
@@ -514,17 +540,17 @@ impl Treemux {
         (mtc.value.unwrap().handler)(req).await
       }
       Err(Error::NotFound(_)) => {
-        if self.handle_not_found.is_none() {
-          default_not_found().await
+        if let Some(handle_not_found) = self.handle_not_found.as_ref() {
+          Ok(handle_not_found(req).await.unwrap())
         } else {
-          (self.handle_not_found.as_ref().unwrap().handler)(req).await
+          default_not_found().await
         }
       }
       Err(Error::MethodNotAllowed(_, allowed)) => {
-        if self.handle_not_found.is_none() {
-          default_method_not_allowed(allowed).await
+        if let Some(handle_method_not_allowed) = self.handle_method_not_allowed.as_ref() {
+          handle_method_not_allowed(req, allowed.clone()).await
         } else {
-          (self.handle_method_not_allowed.as_ref().unwrap().handler)(req).await
+          default_method_not_allowed(allowed).await
         }
       }
     }
@@ -537,6 +563,7 @@ impl Default for Treemux {
       root: Node::new(),
       handle_not_found: None,
       handle_method_not_allowed: None,
+      handle_global_options: None,
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
@@ -639,112 +666,6 @@ pub trait RouterBuilder {
     self.handle(Method::DELETE, path, handler);
   }
 }
-
-// impl<'a> Router<'a> {
-//   pub fn new() -> Self {
-//     Router::default()
-//   }
-
-// pub async fn serve(&mut self, mut req: Request<Body>) -> Result<Response<Body>> {
-//   let root = self.root.search(req.method(), req.uri().path());
-//   // let path = req.uri().path();
-//   if let Ok(root) = root {
-// match root.match_path(path) {
-//   Ok(lookup) => {
-//     req.extensions_mut().insert(lookup.params);
-//     let handler = lookup.value.handler.as_ref().unwrap();
-//     return Pin::from(handler(req)).await;
-//   }
-//   Err(tsr) => {
-//     if req.method() != Method::CONNECT && path != "/" {
-//       let code = match *req.method() {
-//         // Moved Permanently, request with GET method
-//         Method::GET => StatusCode::MOVED_PERMANENTLY,
-//         // Permanent Redirect, request with same method
-//         _ => StatusCode::PERMANENT_REDIRECT,
-//       };
-
-//       if tsr && self.redirect_trailing_slash {
-//         let path = if path.len() > 1 && path.ends_with('/') {
-//           path[..path.len() - 1].to_string()
-//         } else {
-//           path.to_string() + "/"
-//         };
-
-//         return Ok(
-//           Response::builder()
-//             .header(header::LOCATION, path.as_str())
-//             .status(code)
-//             .body(Body::empty())
-//             .unwrap(),
-//         );
-//       };
-
-//       if self.redirect_fixed_path {
-//         if let Some(fixed_path) = root.find_case_insensitive_path(&clean(path), self.redirect_trailing_slash) {
-//           return Ok(
-//             Response::builder()
-//               .header(header::LOCATION, fixed_path.as_str())
-//               .status(code)
-//               .body(Body::empty())
-//               .unwrap(),
-//           );
-//         }
-//       };
-//     };
-//   }
-// }
-// };
-
-// if req.method() == Method::OPTIONS && self.handle_options {
-//   let allow: Vec<String> = self
-//     .allowed(path)
-//     .into_iter()
-//     .filter(|v| !v.trim().is_empty())
-//     .collect();
-
-//   if !allow.is_empty() {
-//     match self.handle_global_options.as_ref() {
-//       Some(handler) => return Pin::from(handler(req)).await,
-//       None => {
-//         return Ok(
-//           Response::builder()
-//             .header(header::ALLOW, allow.join(", "))
-//             .body(Body::empty())
-//             .unwrap(),
-//         );
-//       }
-//     };
-//   }
-// } else {
-//   // handle method not allowed
-//   let allow = self.allowed(path).join(", ");
-
-//   if !allow.is_empty() {
-//     if let Some(handler) = self.handle_method_not_allowed.as_ref() {
-//       return Pin::from(handler(req)).await;
-//     }
-//     return Ok(
-//       Response::builder()
-//         .header(header::ALLOW, allow)
-//         .status(StatusCode::METHOD_NOT_ALLOWED)
-//         .body(Body::empty())
-//         .unwrap(),
-//     );
-//   }
-// };
-
-//   match self.handle_not_found.as_mut() {
-//     Some(handler) => Pin::from(handler(req)).await,
-//     None => Ok(
-//       Response::builder()
-//         .status(StatusCode::NOT_FOUND)
-//         .body(Body::empty())
-//         .unwrap(),
-//     ),
-//   }
-// }
-// }
 
 #[cfg(test)]
 mod tests {

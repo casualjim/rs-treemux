@@ -268,16 +268,21 @@ where
   }
 
   pub fn search<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<Match<'b, V>, Error> {
-    let pth = path.as_ref().to_string();
+    let pth: Cow<str> = path.as_ref().to_string().into();
     self
-      .internal_search(method, strip_start_slash(pth.into()))
+      .internal_search(method, strip_start_slash(pth.clone()), pth)
       .map(|mut v| {
         v.update_parameters();
         v
       })
   }
 
-  fn internal_search<'b>(&'b self, method: &'b Method, path: Cow<'b, str>) -> Result<Match<'b, V>, Error> {
+  fn internal_search<'b>(
+    &'b self,
+    method: &'b Method,
+    path: Cow<'b, str>,
+    original_path: Cow<'b, str>,
+  ) -> Result<Match<'b, V>, Error> {
     let path_len = path.len();
     if path.is_empty() {
       let mut allowed_methods = vec![];
@@ -286,8 +291,12 @@ where
           allowed_methods.push(key.clone());
         }
       }
-      if self.leaf_handler.is_empty() {
-        return Err(Error::MethodNotAllowed(method.clone(), allowed_methods));
+      if self.leaf_handler.get(method).is_none() {
+        if !allowed_methods.is_empty() {
+          return Err(Error::MethodNotAllowed(method.clone(), allowed_methods));
+        } else {
+          return Err(Error::NotFound(original_path.to_string()));
+        }
       }
 
       return Ok(Match {
@@ -312,7 +321,7 @@ where
         let child_path_len = child.path.len();
         if path_len >= child_path_len && child.path == path[..child_path_len] {
           let next_path = path.chars().skip(child_path_len).collect();
-          found = child.internal_search(method, next_path);
+          found = child.internal_search(method, next_path, original_path.clone());
         }
         break;
       }
@@ -330,7 +339,7 @@ where
       let next_token: Cow<'a, str> = path.chars().skip(next_slash).collect();
 
       if !this_token.is_empty() {
-        let wc_match = wildcard_child.internal_search(method, next_token);
+        let wc_match = wildcard_child.internal_search(method, next_token, original_path);
 
         if wc_match.as_ref().ok().filter(|v| v.value.is_some()).is_some() || (found.is_err() && wc_match.is_ok()) {
           let pth = percent_decode_str(this_token.as_ref()).decode_utf8_lossy().to_string();

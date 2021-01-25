@@ -6,11 +6,15 @@ use std::{
   task::{Context, Poll},
 };
 
+use crate::Treemux;
 use futures::Future;
 use hyper::{http, service::Service};
 use hyper::{server::conn::AddrStream, Body, Request, Response};
-
-use crate::Treemux;
+#[cfg(feature = "native-tls")]
+use hyper_tls::TlsStream;
+use tokio::net::TcpStream;
+#[cfg(feature = "rustls")]
+use tokio_rustls::TlsStream as RustlsStream;
 
 #[doc(hidden)]
 pub struct MakeRouterService<T: Send + Sync + 'static>(pub Arc<T>, pub Treemux);
@@ -34,6 +38,62 @@ where
       app_context: self.0.clone(),
       router: &self.1,
       remote_addr: conn.remote_addr(),
+    };
+
+    // let service = self.1.clone();
+    let fut = async move { Ok::<_, Infallible>(service) };
+    Box::pin(fut)
+  }
+}
+
+#[cfg(feature = "native-tls")]
+impl<T> Service<&TlsStream<TcpStream>> for MakeRouterService<T>
+where
+  T: Send + Sync + 'static,
+{
+  type Response = RouterService<T>;
+  type Error = Infallible;
+
+  #[allow(clippy::type_complexity)]
+  type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+  fn poll_ready(&mut self, _: &mut Context) -> Poll<Result<(), Self::Error>> {
+    Poll::Ready(Ok(()))
+  }
+
+  fn call(&mut self, conn: &TlsStream<TcpStream>) -> Self::Future {
+    let service = RouterService {
+      app_context: self.0.clone(),
+      router: &self.1,
+      remote_addr: conn.get_ref().get_ref().get_ref().peer_addr().unwrap(),
+    };
+
+    // let service = self.1.clone();
+    let fut = async move { Ok::<_, Infallible>(service) };
+    Box::pin(fut)
+  }
+}
+
+#[cfg(feature = "rustls")]
+impl<T> Service<&RustlsStream<TcpStream>> for MakeRouterService<T>
+where
+  T: Send + Sync + 'static,
+{
+  type Response = RouterService<T>;
+  type Error = Infallible;
+
+  #[allow(clippy::type_complexity)]
+  type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+  fn poll_ready(&mut self, _: &mut Context) -> Poll<Result<(), Self::Error>> {
+    Poll::Ready(Ok(()))
+  }
+
+  fn call(&mut self, conn: &RustlsStream<TcpStream>) -> Self::Future {
+    let service = RouterService {
+      app_context: self.0.clone(),
+      router: &self.1,
+      remote_addr: conn.get_ref().0.peer_addr().unwrap(),
     };
 
     // let service = self.1.clone();
