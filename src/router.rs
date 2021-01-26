@@ -462,6 +462,7 @@ impl Builder {
     let route = Route::new(path.clone(), req_handler);
     let mut hcfg = HandlerConfig::new(method.clone(), path.clone(), route.clone());
     hcfg.add_slash = add_slash;
+    hcfg.head_can_use_get = self.head_can_use_get;
     root.insert(hcfg);
 
     if self.escape_added_routes {
@@ -477,6 +478,7 @@ impl Builder {
           },
         );
         hcfg.add_slash = add_slash;
+        hcfg.head_can_use_get = self.head_can_use_get;
         root.insert(hcfg);
       }
     }
@@ -854,8 +856,12 @@ pub trait RouterBuilder {
 #[cfg(test)]
 mod tests {
 
+  use core::panic;
+  use std::sync::Arc;
+
   use futures::prelude::*;
-  use hyper::{http, Body, Method, Request, Response, StatusCode};
+
+  use hyper::{header::HeaderValue, http, Body, Method, Request, Response, StatusCode};
 
   use crate::{Handler, Treemux};
 
@@ -909,6 +915,12 @@ mod tests {
       .unwrap();
     let response = router.serve(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+  }
+
+  #[tokio::test]
+  async fn test_group_method_scenarios() {
+    test_group_methods(false).await;
+    test_group_methods(true).await;
   }
 
   #[tokio::test]
@@ -1002,5 +1014,90 @@ mod tests {
         resp
       })
     })
+  }
+
+  async fn test_group_methods(head_can_use_get: bool) {
+    let make_handler = |method: Method| {
+      Box::new(move |_req: Request<Body>| {
+        let method = method.clone();
+        async move {
+          Ok(
+            Response::builder()
+              .header(
+                "x-expected-method",
+                HeaderValue::from_str(method.clone().as_str()).unwrap(),
+              )
+              .body(Body::empty())
+              .unwrap(),
+          )
+        }
+      })
+    };
+
+    let make_router = || {
+      let mut router = Treemux::builder();
+      router.head_can_use_get = head_can_use_get;
+
+      let mut b = router.scope("/base");
+      let mut g = b.scope("/user");
+      g.get("/:param", make_handler(Method::GET));
+      g.post("/:param", make_handler(Method::POST));
+      g.patch("/:param", make_handler(Method::PATCH));
+      g.put("/:param", make_handler(Method::PUT));
+      g.delete("/:param", make_handler(Method::DELETE));
+      router
+    };
+
+    let test_method = |router: Arc<Treemux>, method: Method, expect: Option<Method>| async move {
+      let router = router.clone();
+      let req = Request::builder()
+        .uri(format!("/base/user/{}", method.as_str()))
+        .method(method.clone())
+        .body(Body::empty())
+        .unwrap();
+      let result = router.serve(req).await;
+      let resp = result.unwrap();
+      match expect {
+        Some(expect) => {
+          let result_method = resp
+            .headers()
+            .get("x-expected-method")
+            .and_then(|r| Method::from_bytes(r.as_bytes()).ok());
+          if Some(expect.clone()) != result_method {
+            panic!(
+              "Method {} got result ({}) {:?}, expected {}",
+              method,
+              resp.status(),
+              result_method,
+              expect
+            );
+          }
+        }
+        None => {
+          if resp.status() != StatusCode::METHOD_NOT_ALLOWED {
+            panic!("Method {} not expected to match but saw code {}", method, resp.status());
+          }
+        }
+      }
+    };
+
+    let router = Arc::new(make_router().build());
+
+    test_method(router.clone(), Method::GET, Some(Method::GET)).await;
+    test_method(router.clone(), Method::POST, Some(Method::POST)).await;
+    test_method(router.clone(), Method::PATCH, Some(Method::PATCH)).await;
+    test_method(router.clone(), Method::PUT, Some(Method::PUT)).await;
+    test_method(router.clone(), Method::DELETE, Some(Method::DELETE)).await;
+    if head_can_use_get {
+      info!("test implicit head with head_can_use_get = true");
+      test_method(router.clone(), Method::HEAD, Some(Method::GET)).await;
+    } else {
+      info!("test implicit head with head_can_use_get = false");
+      test_method(router.clone(), Method::HEAD, None).await;
+    }
+
+    let mut router = make_router();
+    router.head("/base/user/:param", make_handler(Method::HEAD));
+    test_method(Arc::new(router.build()), Method::HEAD, Some(Method::HEAD)).await;
   }
 }

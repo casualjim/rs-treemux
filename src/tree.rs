@@ -172,6 +172,7 @@ struct Handler<V> {
   method: Method,
   value: V,
   implicit_head: bool,
+  head_can_use_get: bool,
   add_slash: bool,
 }
 
@@ -198,6 +199,7 @@ pub struct HandlerConfig<'a, V> {
   pub method: Method,
   pub path: Cow<'a, str>,
   pub implicit_head: bool,
+  pub head_can_use_get: bool,
   pub add_slash: bool,
   pub value: V,
 }
@@ -217,6 +219,7 @@ impl<'a, V> HandlerConfig<'a, V> {
       path,
       implicit_head: false,
       add_slash: false,
+      head_can_use_get: false,
       value,
     }
   }
@@ -249,6 +252,7 @@ where
         method: config.method,
         value: config.value,
         implicit_head: config.implicit_head,
+        head_can_use_get: config.head_can_use_get,
         add_slash: config.add_slash,
       },
     );
@@ -666,7 +670,10 @@ where
           self.leaf_wildcard_names = Some(wildcards.clone());
         }
       }
-      self.set_handler(handler.method, handler.value, handler.implicit_head, handler.add_slash);
+      self.set_handler(handler.method.clone(), handler.value.clone(), false, handler.add_slash);
+      if handler.head_can_use_get && handler.method == Method::GET && !self.leaf_handler.contains_key(&Method::HEAD) {
+        self.set_handler(Method::HEAD, handler.value, true, handler.add_slash);
+      }
       return;
     }
 
@@ -717,7 +724,10 @@ where
         },
       );
       self.catch_all_child.as_mut().map(move |mut n| {
-        n.set_handler(handler.method, handler.value, handler.implicit_head, handler.add_slash);
+        n.set_handler(handler.method.clone(), handler.value.clone(), false, handler.add_slash);
+        if handler.head_can_use_get && handler.method == Method::GET && !n.leaf_handler.contains_key(&Method::HEAD) {
+          n.set_handler(Method::HEAD, handler.value, true, handler.add_slash);
+        }
         n.leaf_wildcard_names = Some(wildc);
         n
       });
@@ -1094,6 +1104,7 @@ mod tests {
       path: path.into(),
       implicit_head: false,
       add_slash: false,
+      head_can_use_get: false,
       value: Arc::new(move |mut req: Request<Body>| {
         let params = req.extensions_mut().get_mut::<Params>().unwrap();
         params.push(("path", path));
@@ -1458,6 +1469,7 @@ mod tests {
         method: Method::GET,
         value: (),
         implicit_head: false,
+        head_can_use_get: false,
         add_slash: false,
       },
     );
@@ -1476,6 +1488,7 @@ mod tests {
         method: Method::GET,
         value: (),
         implicit_head: false,
+        head_can_use_get: false,
         add_slash: false,
       },
     );
@@ -1494,6 +1507,7 @@ mod tests {
         method: Method::GET,
         value: (),
         implicit_head: false,
+        head_can_use_get: false,
         add_slash: false,
       },
     );
@@ -1505,6 +1519,7 @@ mod tests {
         method: Method::GET,
         value: (),
         implicit_head: false,
+        head_can_use_get: false,
         add_slash: false,
       },
     );
@@ -1523,6 +1538,7 @@ mod tests {
         method: Method::GET,
         value: (),
         implicit_head: false,
+        head_can_use_get: false,
         add_slash: false,
       },
     );
@@ -1540,6 +1556,7 @@ mod tests {
         method: Method::GET,
         value: (),
         implicit_head: false,
+        head_can_use_get: false,
         add_slash: false,
       },
     );
