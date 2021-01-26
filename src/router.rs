@@ -7,7 +7,6 @@
 //! It scales well even with very long paths and a large number of routes.
 //! A compressing dynamic trie (radix tree) structure is used for efficient matching.
 //!
-//! With the `hyper-server` feature enabled, the `Router` can be used as a router for a hyper server:
 //!
 //! ```rust,no_run
 //! use treemux::{Treemux, RouterBuilder, Params};
@@ -75,11 +74,11 @@
 //!
 //! There are two ways to retrieve the value of a parameter:
 //!  1) by the name of the parameter
-//! ```ignore
-//!  # use treemux::tree::Params;
+//! ```rust,no_run
+//!  # use treemux::Params;
 //!  # let params = Params::default();
-
-//!  let user = params.by_name("user") // defined by :user or *user
+//!
+//!  let user = params.get("user"); // defined by :user or *user
 //! ```
 //!  2) by the index of the parameter. This way you can also get the name (key)
 //! ```rust,no_run
@@ -91,10 +90,14 @@
 
 use crate::{
   serve::MakeRouterService,
-  tree::{Error, HandlerConfig, Node, Params},
-  RedirectBehavior,
+  tree::{HandlerConfig, Match, Node, Params},
 };
-use hyper::{header, http, Body, Method, Request, Response, StatusCode};
+
+use header::HeaderValue;
+use hyper::{
+  header::{self, CONTENT_TYPE, LOCATION},
+  http, Body, Method, Request, Response, StatusCode,
+};
 use std::sync::{Arc, Mutex};
 use std::{borrow::Cow, collections::HashMap};
 use std::{future::Future, net::SocketAddr};
@@ -218,10 +221,15 @@ impl<'a> RouterBuilder for GroupBuilder<'a> {
     H: Fn(Request<Body>) -> R + Send + Sync + 'static,
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
-    let mut root = self.inner.root.lock().unwrap();
-    let newp: Cow<str> = format!("{}{}", self.prefix, path.into()).into();
-    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    root.insert(HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler)));
+    let path: Cow<str> = path.into().into();
+    let path: Cow<str> = format!("{}{}", self.prefix, path).into();
+    check_path(path.clone());
+
+    self.inner.add_route(method, path, handler)
+    // let mut root = self.inner.root.lock().unwrap();
+    // let newp: Cow<str> = format!("{}{}", self.prefix, path.into()).into();
+    // let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
+    // root.insert(HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler)));
   }
 }
 
@@ -267,17 +275,23 @@ pub struct Builder {
   /// Allows the router to try clean the current request path,
   /// if no handler is registered for it.This is true by default.
   pub redirect_clean_path: bool,
-  /// Sets the default redirect behavior when RedirectTrailingSlash or
-  /// RedirectCleanPath are true. The default value is `Redirect301`.
-  pub redirect_behavior: RedirectBehavior,
 
   /// Overrides the default behavior for a particular HTTP method.
   /// The key is the method name, and the value is the behavior to use for that method.
-  pub redirect_method_behavior: HashMap<Method, RedirectBehavior>,
+  pub redirect_behavior: Option<StatusCode>,
+
+  /// Overrides the default behavior for a particular HTTP method.
+  /// The key is the method name, and the value is the behavior to use for that method.
+  pub redirect_method_behavior: HashMap<Method, StatusCode>,
 
   /// Removes the trailing slash when a catch-all pattern
   /// is matched, if set to true. By default, catch-all paths are never redirected.
   pub remove_catach_all_trailing_slash: bool,
+
+  /// Controls URI escaping behavior when adding a route to the tree.
+  /// If set to true, the router will add both the route as originally passed, and
+  /// a version passed through url::parse. This behavior is disabled by default.
+  pub escape_added_routes: bool,
 }
 
 impl Default for Builder {
@@ -292,9 +306,10 @@ impl Default for Builder {
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
-      redirect_behavior: RedirectBehavior::Redirect301,
+      redirect_behavior: Some(StatusCode::MOVED_PERMANENTLY),
       redirect_method_behavior: HashMap::default(),
       remove_catach_all_trailing_slash: false,
+      escape_added_routes: false,
     }
   }
 }
@@ -366,15 +381,16 @@ impl Builder {
       .into_inner()
       .unwrap();
     let mut result = Treemux::new(root);
-    result.handle_not_found = self.handle_not_found;
-    result.handle_method_not_allowed = self.handle_method_not_allowed;
-    result.handle_global_options = self.handle_global_options;
+    result.handle_not_found = self.handle_not_found.map(Arc::new);
+    result.handle_method_not_allowed = self.handle_method_not_allowed.map(Arc::new);
+    result.handle_global_options = self.handle_global_options.map(Arc::new);
     result.head_can_use_get = self.head_can_use_get;
     result.redirect_trailing_slash = self.redirect_trailing_slash;
     result.redirect_clean_path = self.redirect_clean_path;
     result.redirect_behavior = self.redirect_behavior;
     result.redirect_method_behavior = self.redirect_method_behavior;
-    result.remove_catach_all_trailing_slash = self.remove_catach_all_trailing_slash;
+    result.remove_catch_all_trailing_slash = self.remove_catach_all_trailing_slash;
+    result.escape_added_routes = self.escape_added_routes;
     result
   }
 
@@ -425,6 +441,46 @@ impl Builder {
   pub fn into_service(self) -> MakeRouterService<()> {
     MakeRouterService(Arc::new(()), self.build())
   }
+
+  fn add_route<H, R>(&self, method: Method, path: Cow<'static, str>, handler: H)
+  where
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+  {
+    if path.is_empty() {
+      panic!("Cannot map an empty path");
+    }
+
+    let mut root = self.root.lock().unwrap();
+    let (add_slash, path) = if path.len() > 1 && path.ends_with('/') && self.redirect_trailing_slash {
+      (true, path.strip_suffix('/').unwrap_or_default().to_string().into())
+    } else {
+      (false, path)
+    };
+
+    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
+    let route = Route::new(path.clone(), req_handler);
+    let mut hcfg = HandlerConfig::new(method.clone(), path.clone(), route.clone());
+    hcfg.add_slash = add_slash;
+    root.insert(hcfg);
+
+    if self.escape_added_routes {
+      let u: http::Uri = path.clone().parse().unwrap();
+      let escaped_path: Cow<str> = u.path().to_owned().into();
+      if escaped_path != path {
+        let mut hcfg = HandlerConfig::new(
+          method,
+          escaped_path.clone(),
+          Route {
+            pattern: escaped_path.to_string(),
+            handler: route.handler.clone(),
+          },
+        );
+        hcfg.add_slash = add_slash;
+        root.insert(hcfg);
+      }
+    }
+  }
 }
 
 pub fn check_path(path: Cow<str>) {
@@ -440,38 +496,25 @@ impl RouterBuilder for Builder {
     H: Fn(Request<Body>) -> R + Send + Sync + 'static,
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
   {
-    let mut root = self.root.lock().unwrap();
-
     let path: Cow<str> = path.into().into();
     check_path(path.clone());
-    let newp: Cow<str> = format!("{}{}", self.path, path).into();
-    if newp.is_empty() {
-      panic!("Cannot map an empty path");
-    }
-
-    let (add_slash, newp) = if newp.len() > 1 && newp.ends_with('/') && self.redirect_trailing_slash {
-      (true, newp.strip_suffix('/').unwrap_or_default().to_string().into())
-    } else {
-      (false, newp)
-    };
-    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    let mut hcfg = HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler));
-    hcfg.add_slash = add_slash;
-    root.insert(hcfg)
+    let path: Cow<str> = format!("{}{}", self.path, path).into();
+    self.add_route(method, path, handler)
   }
 }
 
 pub struct Treemux {
   root: Node<'static, Route>,
-  handle_not_found: Option<Handler>,
-  handle_method_not_allowed: Option<MethodNotAllowedHandler>,
-  handle_global_options: Option<Handler>,
+  handle_not_found: Option<Arc<Handler>>,
+  handle_method_not_allowed: Option<Arc<MethodNotAllowedHandler>>,
+  handle_global_options: Option<Arc<Handler>>,
   head_can_use_get: bool,
   redirect_trailing_slash: bool,
   redirect_clean_path: bool,
-  redirect_behavior: RedirectBehavior,
-  redirect_method_behavior: HashMap<Method, RedirectBehavior>,
-  remove_catach_all_trailing_slash: bool,
+  redirect_behavior: Option<StatusCode>,
+  redirect_method_behavior: HashMap<Method, StatusCode>,
+  remove_catch_all_trailing_slash: bool,
+  escape_added_routes: bool,
 }
 impl Treemux {
   fn new(root: Node<'static, Route>) -> Self {
@@ -501,10 +544,14 @@ impl Treemux {
   /// assert!(res.1.is_empty());
   /// ```
   pub fn lookup<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<(Arc<Handler>, Params), bool> {
-    self.root.search(method, path).map_err(|_| false).map(|m| {
-      let vv = m.value.unwrap();
-      (vv.handler.clone(), m.parameters.clone())
-    })
+    self
+      .root
+      .search(method, path)
+      .map(|m| {
+        let vv = m.value.unwrap();
+        Ok((vv.handler.clone(), m.parameters.clone()))
+      })
+      .unwrap_or(Err(false))
   }
 
   /// Converts the `Treemux` into a `Service` which you can serve directly with `Hyper`.
@@ -586,29 +633,107 @@ impl Treemux {
   ///     .await;
   /// # }
   /// ```
-  pub async fn serve(&self, mut req: Request<Body>) -> Result<Response<Body>, http::Error> {
+  pub async fn serve(&self, req: Request<Body>) -> Result<Response<Body>, http::Error> {
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let mut path = req.uri().path().to_string();
 
-    match self.root.search(&method, path) {
-      Ok(mtc) => {
-        req.extensions_mut().insert(mtc.parameters);
-        (mtc.value.unwrap().handler)(req).await
-      }
-      Err(Error::NotFound(_)) => {
-        if let Some(handle_not_found) = self.handle_not_found.as_ref() {
-          Ok(handle_not_found(req).await.unwrap())
-        } else {
-          default_not_found().await
+    let has_trailing_slash = path.len() > 1 && path.ends_with('/');
+    if has_trailing_slash && self.redirect_trailing_slash {
+      path = path.strip_suffix('/').unwrap().to_string();
+    }
+
+    let mut match_result = self.root.search(&method, path.clone());
+
+    if match_result.is_none() {
+      if self.redirect_clean_path {
+        let clean_path: Cow<str> = crate::path::clean(&path).into();
+        match_result = self.root.search(&method, clean_path.clone());
+        if match_result.is_none() {
+          return self.return_response(req, match_result).await;
         }
+        if let Some(rdb) = self.redirect_behavior {
+          return self.redirect(req, rdb, clean_path).await;
+        }
+      } else {
+        return self.return_response(req, match_result).await;
       }
-      Err(Error::MethodNotAllowed(_, allowed)) => {
+    }
+
+    let match_result = match_result.unwrap();
+    let mut handler = match_result.value.map(|v| v.handler.clone());
+    if handler.is_none() {
+      if req.method() == Method::OPTIONS && self.handle_global_options.is_some() {
+        // req.extensions_mut().insert(match_result.parameters);
+        handler = self.handle_global_options.clone();
+      }
+
+      if handler.is_none() {
+        let allowed = match_result.leaf_handler.keys().cloned().collect();
         if let Some(handle_method_not_allowed) = self.handle_method_not_allowed.as_ref() {
-          handle_method_not_allowed(req, allowed.clone()).await
+          return handle_method_not_allowed(req, allowed).await;
         } else {
-          default_method_not_allowed(allowed).await
+          return default_method_not_allowed(allowed).await;
         }
       }
+    }
+
+    if (!match_result.is_catch_all || self.remove_catch_all_trailing_slash)
+      && has_trailing_slash != match_result.add_slash
+      && self.redirect_trailing_slash
+    {
+      let pth = if match_result.add_slash {
+        format!("{}/", path)
+      } else {
+        path
+      };
+
+      if handler.is_some() {
+        if let Some(rdb) = self.redirect_behavior {
+          return self.redirect(req, rdb, pth.into()).await;
+        }
+      }
+    }
+
+    self.return_response(req, Some(match_result)).await
+  }
+
+  async fn redirect(
+    &self,
+    req: Request<Body>,
+    rdb: StatusCode,
+    new_path: Cow<'_, str>,
+  ) -> Result<Response<Body>, http::Error> {
+    Ok(
+      Response::builder()
+        .status(rdb)
+        .header(LOCATION, new_path.as_ref())
+        .header(
+          CONTENT_TYPE,
+          req
+            .headers()
+            .get(CONTENT_TYPE)
+            .cloned()
+            .unwrap_or_else(|| HeaderValue::from_static("text/html; charset=utf-8")),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+  }
+
+  async fn return_response(
+    &self,
+    mut req: Request<Body>,
+    match_result: Option<Match<'_, Route>>,
+  ) -> Result<Response<Body>, http::Error> {
+    if let Some(mtc) = match_result {
+      req.extensions_mut().insert(mtc.parameters);
+      return (mtc.value.unwrap().handler)(req).await;
+    }
+
+    if let Some(handle_not_found) = self.handle_not_found.as_ref() {
+      Ok(handle_not_found(req).await.unwrap())
+    } else {
+      default_not_found().await
     }
   }
 }
@@ -623,9 +748,10 @@ impl Default for Treemux {
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
-      redirect_behavior: RedirectBehavior::Redirect301,
+      redirect_behavior: Some(StatusCode::MOVED_PERMANENTLY),
       redirect_method_behavior: HashMap::default(),
-      remove_catach_all_trailing_slash: false,
+      remove_catch_all_trailing_slash: false,
+      escape_added_routes: false,
     }
   }
 }
@@ -729,11 +855,61 @@ pub trait RouterBuilder {
 mod tests {
 
   use futures::prelude::*;
-  use hyper::{http, Body, Request, Response};
+  use hyper::{http, Body, Method, Request, Response, StatusCode};
 
   use crate::{Handler, Treemux};
 
   use super::{Builder, RouterBuilder};
+
+  async fn empty_ok_response(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
+    Ok(Response::builder().status(StatusCode::OK).body(Body::empty()).unwrap())
+  }
+
+  #[test]
+  #[should_panic]
+  fn test_empty_router_mapping() {
+    Builder::default().get("", empty_ok_response);
+  }
+
+  #[tokio::test]
+  async fn test_scope_slash_mapping() {
+    femme::try_with_level(femme::LevelFilter::Trace).ok();
+    let mut b = Builder::default();
+    b.scope("/foo").get("/", empty_ok_response);
+    let router = b.build();
+
+    let req = Request::builder()
+      .method(Method::GET)
+      .uri("/foo")
+      .body(Body::empty())
+      .unwrap();
+    let response = router.serve(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+
+    let req = Request::builder()
+      .method(Method::GET)
+      .uri("/foo/")
+      .body(Body::empty())
+      .unwrap();
+    let response = router.serve(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+  }
+
+  #[tokio::test]
+  async fn test_empty_scope_mapping() {
+    femme::try_with_level(femme::LevelFilter::Trace).ok();
+    let mut b = Builder::default();
+    b.scope("/foo").get("", empty_ok_response);
+    let router = b.build();
+
+    let req = Request::builder()
+      .method(Method::GET)
+      .uri("/foo")
+      .body(Body::empty())
+      .unwrap();
+    let response = router.serve(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+  }
 
   #[tokio::test]
   async fn test_builder() {

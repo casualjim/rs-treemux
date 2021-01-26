@@ -5,6 +5,7 @@ use hyper::{header::HeaderValue, http, Body, Request, Response};
 
 use crate::Handler;
 
+/// Logs requests with the kvlog macro.
 pub fn log_requests<H, R>(next: H) -> Handler
 where
   H: Fn(Request<Body>) -> R + Send + Sync + 'static,

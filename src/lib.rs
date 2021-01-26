@@ -208,16 +208,16 @@ pub use tree::{Param, Params};
 pub mod router;
 
 #[doc(inline)]
-pub use router::{Handler, RouterBuilder, Treemux};
+pub use router::{Handler, Middleware, RouterBuilder, Treemux};
 
-/// RedirectBehavior sets the behavior when the router redirects the request to the
-/// canonical version of the requested URL using RedirectTrailingSlash or RedirectClean.
+/// Sets the behavior when the router redirects the request to the
+/// canonical version of the requested URL using `redirect_trailing_slash` or `redirect_clean`.
 /// The default behavior is to return a 301 status, redirecting the browser to the version
 /// of the URL that matches the given pattern.
 ///
 /// On a POST request, most browsers that receive a 301 will submit a GET request to
 /// the redirected URL, meaning that any data will likely be lost. If you want to handle
-/// and avoid this behavior, you may use Redirect307, which causes most browsers to
+/// and avoid this behavior, you may use `TEMPORARY_REDIRECT` (307), which causes most browsers to
 /// resubmit the request using the original method and request body.
 ///
 /// Since 307 is supposed to be a temporary redirect, the new 308 status code has been
@@ -225,12 +225,11 @@ pub use router::{Handler, RouterBuilder, Treemux};
 /// is permanent. The big caveat here is that the RFC is relatively recent, and older
 /// browsers will not know what to do with it. Therefore its use is not recommended
 /// unless you really know what you're doing.
-///
-/// Finally, the UseHandler value will simply call the handler function for the pattern.
 pub enum RedirectBehavior {
   Redirect301,
   Redirect307,
   Redirect308,
+  UseHandler,
 }
 
 // // test the code examples in README.md

@@ -2,18 +2,8 @@ use hyper::Method;
 use percent_encoding::percent_decode_str;
 use std::{borrow::Cow, collections::HashMap, fmt::Debug, iter::FromIterator, ops::Index, vec};
 
-use thiserror::{self, Error};
-
-#[derive(Error, Debug)]
-pub enum Error {
-  #[error("{0} was not found")]
-  NotFound(String),
-  #[error("{0} not allowed, only: {1:?}")]
-  MethodNotAllowed(Method, Vec<Method>),
-}
-
 /// The response returned when getting the value for a specific path with
-/// [`Node::match_path`](crate::Node::match_path)
+/// [`Node::search`](crate::tree::Node::search)
 #[derive(Debug)]
 pub struct Match<'a, V> {
   /// The value stored under the matched node.
@@ -25,9 +15,11 @@ pub struct Match<'a, V> {
   pub pattern: Cow<'a, str>,
   pub implicit_head: bool,
   pub add_slash: bool,
+  pub is_catch_all: bool,
   /// The route parameters. See [parameters](/index.html#parameters) for more details.
   param_names: Vec<Cow<'a, str>>,
-  pub known_methods: Vec<Method>,
+  pub leaf_handler: &'a HashMap<Method, V>,
+  /// The route parameters. See [parameters](/index.html#parameters) for more details.
   pub parameters: Params,
 }
 
@@ -232,11 +224,6 @@ impl<'a, V> HandlerConfig<'a, V> {
   fn stripped_path(&self) -> Cow<'a, str> {
     strip_start_slash(self.path.clone())
   }
-
-  pub fn needs_slash(mut self) -> Self {
-    self.add_slash = true;
-    self
-  }
 }
 
 type IdxTuple = (usize, char);
@@ -267,7 +254,7 @@ where
     );
   }
 
-  pub fn search<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<Match<'b, V>, Error> {
+  pub fn search<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Option<Match<'b, V>> {
     let pth: Cow<str> = path.as_ref().to_string().into();
     self
       .internal_search(method, strip_start_slash(pth.clone()), pth)
@@ -282,24 +269,14 @@ where
     method: &'b Method,
     path: Cow<'b, str>,
     original_path: Cow<'b, str>,
-  ) -> Result<Match<'b, V>, Error> {
+  ) -> Option<Match<'b, V>> {
     let path_len = path.len();
     if path.is_empty() {
-      let mut allowed_methods = vec![];
-      for key in self.leaf_handler.keys() {
-        if key != method {
-          allowed_methods.push(key.clone());
-        }
-      }
-      if self.leaf_handler.get(method).is_none() {
-        if !allowed_methods.is_empty() {
-          return Err(Error::MethodNotAllowed(method.clone(), allowed_methods));
-        } else {
-          return Err(Error::NotFound(original_path.to_string()));
-        }
+      if self.leaf_handler.is_empty() {
+        return None;
       }
 
-      return Ok(Match {
+      return Some(Match {
         value: self.leaf_handler.get(method),
         params: vec![],
         path,
@@ -307,14 +284,15 @@ where
         param_names: self.leaf_wildcard_names.clone().unwrap_or_default(),
         implicit_head: self.implicit_head,
         add_slash: self.add_slash,
-        known_methods: allowed_methods,
+        leaf_handler: &self.leaf_handler,
         parameters: Params::default(),
+        is_catch_all: self.is_catch_all,
       });
     }
 
     // First see if this matches a static token.
     let first_char = &path.chars().next().unwrap();
-    let mut found = Err(Error::NotFound(path.to_string()));
+    let mut found = None;
     for (i, static_index) in (&self.static_indices).iter().enumerate() {
       if static_index == first_char {
         let child = self.static_child[i].as_ref().unwrap();
@@ -329,7 +307,7 @@ where
 
     // If we found a node and it had a valid handler, then return here. Otherwise
     // let's remember that we found this one, but look for a better match.
-    if found.as_ref().ok().filter(|v| v.value.is_some()).is_some() {
+    if found.as_ref().filter(|v| v.value.is_some()).is_some() {
       return found;
     }
 
@@ -341,10 +319,10 @@ where
       if !this_token.is_empty() {
         let wc_match = wildcard_child.internal_search(method, next_token, original_path);
 
-        if wc_match.as_ref().ok().filter(|v| v.value.is_some()).is_some() || (found.is_err() && wc_match.is_ok()) {
+        if wc_match.as_ref().filter(|v| v.value.is_some()).is_some() || (found.is_none() && wc_match.is_some()) {
           let pth = percent_decode_str(this_token.as_ref()).decode_utf8_lossy().to_string();
 
-          if let Ok(mut the_match) = wc_match {
+          if let Some(mut the_match) = wc_match {
             let mut nwparams = vec![pth.into()];
             nwparams.append(&mut the_match.params.to_vec());
             the_match.params = nwparams;
@@ -352,9 +330,9 @@ where
               if the_match.param_names.is_empty() {
                 the_match.param_names = wildcard_child.leaf_wildcard_names.clone().unwrap_or_default();
               }
-              return Ok(the_match);
+              return Some(the_match);
             } else {
-              found = Ok(the_match);
+              found = Some(the_match);
             }
           } else {
             // Didn't actually find a handler here, so remember that we
@@ -370,18 +348,12 @@ where
       // Hit the catchall, so just assign the whole remaining path if it
       // has a matching handler.
       let handler = catch_all_child.leaf_handler.get(&method);
-      let mut allowed_methods = vec![];
-      for key in catch_all_child.leaf_handler.keys() {
-        if handler.is_none() || key != method {
-          allowed_methods.push(key.clone());
-        }
-      }
 
       // Found a handler, or we found a catchall node without a handler.
       // Either way, return it since there's nothing left to check after this.
-      if handler.is_some() || found.is_err() {
+      if handler.is_some() || found.is_none() {
         let pth = percent_decode_str(path.as_ref()).decode_utf8_lossy().to_string();
-        return Ok(Match {
+        return Some(Match {
           value: handler,
           params: vec![pth.clone().into()],
           pattern: pth.into(),
@@ -389,8 +361,9 @@ where
           path: self.path.clone(),
           add_slash: catch_all_child.add_slash,
           implicit_head: catch_all_child.implicit_head,
-          known_methods: allowed_methods,
+          leaf_handler: &catch_all_child.leaf_handler,
           parameters: Params::default(),
+          is_catch_all: catch_all_child.is_catch_all,
         });
       }
     }
@@ -1387,14 +1360,14 @@ mod tests {
     expected_params: Params,
   ) {
     let mtc = node.search(method, path);
-    if !expected_path.is_empty() && mtc.is_err() {
+    if !expected_path.is_empty() && mtc.is_none() {
       panic!(
         "No match for {}, expected {}\n{}",
         path,
         expected_path,
         node.dump_tree("", "")
       )
-    } else if expected_path.is_empty() && mtc.is_ok() {
+    } else if expected_path.is_empty() && mtc.is_some() {
       panic!(
         "Expected no match for {} but got {:?} with params {:?}.\nNode and subtree was\n{}",
         path,
@@ -1404,7 +1377,7 @@ mod tests {
       );
     }
 
-    if mtc.is_err() {
+    if mtc.is_none() {
       return;
     }
 

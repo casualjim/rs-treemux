@@ -1,12 +1,13 @@
 use anyhow::Result;
 use femme::LevelFilter;
+use futures::FutureExt;
 use hyper::{
   header::{ALLOW, CONTENT_TYPE},
   http, Method, Response, StatusCode,
 };
 use hyper::{Body, Request, Server};
 use log::info;
-use treemux::{middlewares, RouterBuilder, Treemux};
+use treemux::{middlewares, Handler, RouterBuilder, Treemux};
 
 async fn todos(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
   Response::builder()
@@ -51,6 +52,18 @@ async fn main() -> Result<()> {
   femme::with_level(LevelFilter::Debug);
   let mut router = Treemux::builder();
 
+  router.middleware(|next: Handler| -> Handler {
+    info!("middleware constructor");
+    Box::new(move |request| {
+      info!("before handling request");
+      let fut = next(request).map(|response| {
+        info!("after processing the request");
+        response
+      });
+
+      Box::pin(fut)
+    })
+  });
   router.middleware(middlewares::log_requests);
 
   router.not_found(not_found);
