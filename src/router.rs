@@ -98,8 +98,11 @@ use hyper::{
   header::{self, CONTENT_TYPE, LOCATION},
   http, Body, Method, Request, Response, StatusCode,
 };
-use std::sync::{Arc, Mutex};
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, fmt::Display};
+use std::{
+  fmt::Debug,
+  sync::{Arc, Mutex},
+};
 use std::{future::Future, net::SocketAddr};
 use std::{pin::Pin, str};
 
@@ -188,18 +191,31 @@ pub struct GroupBuilder<'a> {
 }
 
 impl<'a> GroupBuilder<'a> {
-  pub fn extend<B: Into<Treemux>>(&self, routes: B) {
-    self
-      .inner
-      .root
-      .lock()
-      .unwrap()
-      .extend(self.prefix.to_string().into(), routes.into().root)
+  pub fn extend<P: Into<Cow<'static, str>>, B: Into<Treemux>>(&self, path: P, routes: B) {
+    let p: Cow<str> = path.into();
+    if p.is_empty() {
+      panic!("Scope path must not be empty");
+    }
+
+    check_path(p.clone());
+    let pth = format!("{}{}", self.prefix, p.as_ref());
+    self.inner.root.lock().unwrap().extend(
+      (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
+      routes.into().root,
+    )
   }
 
   pub fn scope<'b, P: Into<Cow<'static, str>>>(&'b mut self, path: P) -> GroupBuilder<'b> {
+    let p: Cow<str> = path.into();
+    if p.is_empty() {
+      panic!("Scope path must not be empty");
+    }
+
+    check_path(p.clone());
+    let pth = format!("{}{}", self.prefix, p.as_ref());
+
     GroupBuilder {
-      prefix: format!("{}{}", self.prefix, path.into()).into(),
+      prefix: (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
       inner: self.inner,
       chain: self.chain.clone(),
     }
@@ -226,10 +242,6 @@ impl<'a> RouterBuilder for GroupBuilder<'a> {
     check_path(path.clone());
 
     self.inner.add_route(method, path, handler)
-    // let mut root = self.inner.root.lock().unwrap();
-    // let newp: Cow<str> = format!("{}{}", self.prefix, path.into()).into();
-    // let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    // root.insert(HandlerConfig::new(method, newp.clone(), Route::new(newp, req_handler)));
   }
 }
 
@@ -316,12 +328,29 @@ impl Default for Builder {
 
 impl Builder {
   pub fn extend<P: Into<Cow<'static, str>>, B: Into<Treemux>>(&self, path: P, routes: B) {
-    self.root.lock().unwrap().extend(path.into(), routes.into().root)
+    let p: Cow<str> = path.into();
+    if p.is_empty() {
+      panic!("Scope path must not be empty");
+    }
+
+    check_path(p.clone());
+    let pth = format!("{}{}", self.path, p.as_ref());
+    self.root.lock().unwrap().extend(
+      (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
+      routes.into().root,
+    )
   }
 
   pub fn scope<'b, P: Into<Cow<'b, str>>>(&'b mut self, path: P) -> GroupBuilder<'b> {
+    let p: Cow<str> = path.into();
+    if p.is_empty() {
+      panic!("Scope path must not be empty");
+    }
+
+    check_path(p.clone());
+    let pth = format!("{}{}", self.path, p.as_ref());
     GroupBuilder {
-      prefix: format!("{}{}", self.path, path.into()).into(),
+      prefix: (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
       inner: self,
       chain: self.chain.clone(),
     }
@@ -518,6 +547,31 @@ pub struct Treemux {
   remove_catch_all_trailing_slash: bool,
   escape_added_routes: bool,
 }
+
+impl Debug for Treemux {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Treemux")
+      .field("handle_not_found", &self.handle_not_found.is_some())
+      .field("handle_method_not_allowed", &self.handle_method_not_allowed.is_some())
+      .field("handle_global_options", &self.handle_global_options.is_some())
+      .field("head_can_use_get", &self.head_can_use_get)
+      .field("redirect_trailing_slash", &self.redirect_trailing_slash)
+      .field("redirect_clean_path", &self.redirect_clean_path)
+      .field("redirect_behavior", &self.redirect_behavior)
+      .field("redirect_method_behavior", &self.redirect_method_behavior)
+      .field("remove_catch_all_trailing_slash", &self.remove_catch_all_trailing_slash)
+      .field("escape_added_routes", &self.escape_added_routes)
+      .field("routes", &self.root.dump_tree("", ""))
+      .finish()
+  }
+}
+
+impl Display for Treemux {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&self.root.dump_tree("", ""))
+  }
+}
+
 impl Treemux {
   fn new(root: Node<'static, Route>) -> Self {
     Self {
@@ -921,6 +975,75 @@ mod tests {
   async fn test_group_method_scenarios() {
     test_group_methods(false).await;
     test_group_methods(true).await;
+  }
+
+  #[tokio::test]
+  #[should_panic]
+  async fn test_invalid_path() {
+    let mut b = Builder::default();
+    b.scope("foo");
+  }
+  #[tokio::test]
+  #[should_panic]
+  async fn test_invalid_sub_path() {
+    let mut b = Builder::default();
+    let mut g = b.scope("/foo");
+    g.scope("bar");
+  }
+
+  #[tokio::test]
+  async fn test_set_get_after_head() {
+    let make_handler = |method: Method| {
+      Box::new(move |_req: Request<Body>| {
+        let method = method.clone();
+        async move {
+          Ok(
+            Response::builder()
+              .header(
+                "x-expected-method",
+                HeaderValue::from_str(method.clone().as_str()).unwrap(),
+              )
+              .body(Body::empty())
+              .unwrap(),
+          )
+        }
+      })
+    };
+
+    let mut router = Treemux::builder();
+    router.head_can_use_get = true;
+    router.head("/abc", make_handler(Method::HEAD));
+    router.get("/abc", make_handler(Method::GET));
+
+    let mux = Arc::new(router.build());
+    let test_method = |method: Method, expect: Method| {
+      let router = mux.clone();
+      async move {
+        let req = Request::builder()
+          .uri("/abc")
+          .method(method.clone())
+          .body(Body::empty())
+          .unwrap();
+        let result = router.serve(req).await;
+        let resp = result.unwrap();
+        let result_method = resp
+          .headers()
+          .get("x-expected-method")
+          .and_then(|r| Method::from_bytes(r.as_bytes()).ok());
+        if Some(expect.clone()) != result_method {
+          panic!(
+            "Method {} got result ({}) {:?}, expected {}",
+            method,
+            resp.status(),
+            result_method,
+            expect
+          );
+        }
+      }
+    };
+
+    test_method(Method::HEAD, Method::HEAD).await;
+    test_method(Method::GET, Method::GET).await;
   }
 
   #[tokio::test]
