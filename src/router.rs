@@ -93,12 +93,13 @@ use crate::{
   tree::{HandlerConfig, Match, Node, Params},
 };
 
+use futures::FutureExt;
 use header::HeaderValue;
 use hyper::{
   header::{self, CONTENT_TYPE, LOCATION},
   http, Body, Method, Request, Response, StatusCode,
 };
-use std::{borrow::Cow, collections::HashMap, fmt::Display};
+use std::{borrow::Cow, collections::HashMap, fmt::Display, panic::AssertUnwindSafe};
 use std::{
   fmt::Debug,
   sync::{Arc, Mutex},
@@ -153,6 +154,7 @@ where
 pub type Handler = Box<dyn Fn(Request<Body>) -> HandlerReturn + Send + Sync + 'static>;
 pub type HandlerReturn = Pin<Box<dyn Future<Output = Result<Response<Body>, http::Error>> + Send + 'static>>;
 pub type MethodNotAllowedHandler = Box<dyn Fn(Request<Body>, Vec<Method>) -> HandlerReturn + Send + Sync + 'static>;
+pub type PanicHandler = Box<dyn Fn(HandlerReturn) -> HandlerReturn + Send + Sync + 'static>;
 
 #[derive(Clone)]
 struct Route {
@@ -267,6 +269,22 @@ async fn default_method_not_allowed(allow: Vec<Method>) -> Result<Response<Body>
     .map_err(Into::into)
 }
 
+async fn handle_panics(
+  fut: impl Future<Output = Result<Response<Body>, http::Error>>,
+) -> Result<Response<Body>, http::Error> {
+  let wrapped = AssertUnwindSafe(fut).catch_unwind();
+  match wrapped.await {
+    Ok(response) => response,
+    Err(panic) => {
+      let error = Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from(format!("{:?}", panic)))
+        .unwrap();
+      Ok(error)
+    }
+  }
+}
+
 pub struct Builder {
   path: Cow<'static, str>,
   root: Arc<Mutex<Node<'static, Route>>>,
@@ -274,6 +292,7 @@ pub struct Builder {
   handle_not_found: Option<Handler>,
   handle_method_not_allowed: Option<MethodNotAllowedHandler>,
   handle_global_options: Option<Handler>,
+  handle_panic: Option<PanicHandler>,
   /// Allows the router to use the `GET` handler to respond to
   /// `HEAD` requests if no explicit `HEAD` handler has been added for the
   /// matching pattern. This is true by default.
@@ -315,6 +334,7 @@ impl Default for Builder {
       handle_not_found: None,
       handle_method_not_allowed: None,
       handle_global_options: None,
+      handle_panic: None,
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
@@ -403,6 +423,15 @@ impl Builder {
     self.handle_global_options = Some(req_handler);
   }
 
+  pub fn handle_panics<H, R>(&mut self, handler: H)
+  where
+    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+    H: Fn(HandlerReturn) -> R + Send + Sync + 'static,
+  {
+    let ph: PanicHandler = Box::new(move |fut| Box::pin(handler(fut)));
+    self.handle_panic = Some(ph);
+  }
+
   fn build(self) -> Treemux {
     let root = Arc::try_unwrap(self.root)
       .map_err(|_| ())
@@ -413,6 +442,7 @@ impl Builder {
     result.handle_not_found = self.handle_not_found.map(Arc::new);
     result.handle_method_not_allowed = self.handle_method_not_allowed.map(Arc::new);
     result.handle_global_options = self.handle_global_options.map(Arc::new);
+    result.handle_panic = self.handle_panic;
     result.head_can_use_get = self.head_can_use_get;
     result.redirect_trailing_slash = self.redirect_trailing_slash;
     result.redirect_clean_path = self.redirect_clean_path;
@@ -539,6 +569,7 @@ pub struct Treemux {
   handle_not_found: Option<Arc<Handler>>,
   handle_method_not_allowed: Option<Arc<MethodNotAllowedHandler>>,
   handle_global_options: Option<Arc<Handler>>,
+  handle_panic: Option<PanicHandler>,
   head_can_use_get: bool,
   redirect_trailing_slash: bool,
   redirect_clean_path: bool,
@@ -554,6 +585,7 @@ impl Debug for Treemux {
       .field("handle_not_found", &self.handle_not_found.is_some())
       .field("handle_method_not_allowed", &self.handle_method_not_allowed.is_some())
       .field("handle_global_options", &self.handle_global_options.is_some())
+      .field("handle_panics", &self.handle_panic.is_some())
       .field("head_can_use_get", &self.head_can_use_get)
       .field("redirect_trailing_slash", &self.redirect_trailing_slash)
       .field("redirect_clean_path", &self.redirect_clean_path)
@@ -718,9 +750,12 @@ impl Treemux {
     let match_result = match_result.unwrap();
     let mut handler = match_result.value.map(|v| v.handler.clone());
     if handler.is_none() {
-      if req.method() == Method::OPTIONS && self.handle_global_options.is_some() {
+      let rmeth = req.method();
+      if rmeth == Method::OPTIONS && self.handle_global_options.is_some() {
         // req.extensions_mut().insert(match_result.parameters);
         handler = self.handle_global_options.clone();
+        let h = handler.unwrap();
+        return (h.clone().as_ref())(req).await;
       }
 
       if handler.is_none() {
@@ -783,7 +818,13 @@ impl Treemux {
   ) -> Result<Response<Body>, http::Error> {
     if let Some(mtc) = match_result {
       req.extensions_mut().insert(mtc.parameters);
-      return (mtc.value.unwrap().handler)(req).await;
+      let fut = (mtc.value.unwrap().handler)(req);
+
+      if let Some(handle_panic) = self.handle_panic.as_ref() {
+        return (handle_panic)(fut).await;
+      } else {
+        return handle_panics(fut).await;
+      }
     }
 
     if let Some(handle_not_found) = self.handle_not_found.as_ref() {
@@ -801,6 +842,7 @@ impl Default for Treemux {
       handle_not_found: None,
       handle_method_not_allowed: None,
       handle_global_options: None,
+      handle_panic: None,
       head_can_use_get: true,
       redirect_trailing_slash: true,
       redirect_clean_path: true,
@@ -911,11 +953,15 @@ pub trait RouterBuilder {
 mod tests {
 
   use core::panic;
-  use std::sync::Arc;
+  use std::{panic::AssertUnwindSafe, sync::Arc};
 
   use futures::prelude::*;
 
-  use hyper::{header::HeaderValue, http, Body, Method, Request, Response, StatusCode};
+  use hyper::{
+    body,
+    header::{HeaderName, HeaderValue},
+    http, Body, Method, Request, Response, StatusCode,
+  };
 
   use crate::{Handler, Treemux};
 
@@ -1044,6 +1090,306 @@ mod tests {
 
     test_method(Method::HEAD, Method::HEAD).await;
     test_method(Method::GET, Method::GET).await;
+  }
+
+  #[tokio::test]
+  async fn test_not_found() {
+    let mut router = Treemux::builder();
+    router.get("/user/abc", empty_ok_response);
+
+    let mux = router.build();
+
+    let response = mux
+      .serve(Request::builder().uri("/abc/").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+
+    assert_eq!(StatusCode::NOT_FOUND, response.status());
+
+    let mut router = Treemux::builder();
+    router.get("/user/abc", empty_ok_response);
+    router.not_found(move |_request| async move {
+      Ok(
+        Response::builder()
+          .status(StatusCode::NOT_FOUND)
+          .body(Body::from("custom not found"))
+          .unwrap(),
+      )
+    });
+    let mux = router.build();
+    let response = mux
+      .serve(Request::builder().uri("/abc/").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::NOT_FOUND, response.status());
+    assert_eq!(
+      "custom not found",
+      std::str::from_utf8(body::to_bytes(response.into_body()).await.unwrap().as_ref()).unwrap()
+    )
+  }
+
+  #[tokio::test]
+  async fn test_method_not_allowed_handler() {
+    let mut router = Treemux::builder();
+    router.get("/user/abc", empty_ok_response);
+    router.put("/user/abc", empty_ok_response);
+    router.delete("/user/abc", empty_ok_response);
+    let mux = router.build();
+
+    let response = mux
+      .serve(
+        Request::builder()
+          .method(Method::POST)
+          .uri("/user/abc")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+
+    let mut allow: Vec<String> = response
+      .headers()
+      .get(http::header::ALLOW)
+      .unwrap()
+      .to_str()
+      .unwrap()
+      .split(", ")
+      .map(|v| v.to_string())
+      .collect();
+    allow.sort();
+
+    assert_eq!(StatusCode::METHOD_NOT_ALLOWED, response.status());
+    assert_eq!("DELETE, GET, HEAD, PUT", allow.join(", "));
+
+    let mut router = Treemux::builder();
+    router.get("/user/abc", empty_ok_response);
+    router.put("/user/abc", empty_ok_response);
+    router.delete("/user/abc", empty_ok_response);
+    router.method_not_allowed(move |_request, allowed| async move {
+      let mut allowed = allowed.iter().map(|v| v.as_str().to_string()).collect::<Vec<String>>();
+      allowed.sort();
+      Ok(
+        Response::builder()
+          .status(StatusCode::METHOD_NOT_ALLOWED)
+          .header(http::header::ALLOW, allowed.join(", "))
+          .body(Body::from("custom method not allowed"))
+          .unwrap(),
+      )
+    });
+    let mux = router.build();
+
+    let response = mux
+      .serve(
+        Request::builder()
+          .method(Method::POST)
+          .uri("/user/abc")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+
+    let mut allow: Vec<String> = response
+      .headers()
+      .get(http::header::ALLOW)
+      .unwrap()
+      .to_str()
+      .unwrap()
+      .split(", ")
+      .map(|v| v.to_string())
+      .collect();
+    allow.sort();
+
+    assert_eq!(StatusCode::METHOD_NOT_ALLOWED, response.status());
+    assert_eq!("DELETE, GET, HEAD, PUT", allow.join(", "));
+    assert_eq!(
+      "custom method not allowed",
+      std::str::from_utf8(body::to_bytes(response.into_body()).await.unwrap().as_ref()).unwrap()
+    )
+  }
+
+  #[tokio::test]
+  async fn test_handle_options() {
+    let make_router = || {
+      let mut router = Treemux::builder();
+      router.get("/user/abc", empty_ok_response);
+      router.put("/user/abc", empty_ok_response);
+      router.delete("/user/abc", empty_ok_response);
+      router.options("/user/abc/options", |_req| async {
+        Ok(
+          Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "treemux.rs")
+            .body(Body::empty())
+            .unwrap(),
+        )
+      });
+      router
+    };
+
+    let mux = make_router().build();
+    let res = mux
+      .serve(
+        Request::builder()
+          .method(Method::OPTIONS)
+          .uri("/user/abc")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::METHOD_NOT_ALLOWED, res.status());
+
+    let mut builder = make_router();
+    builder.global_options(|_req| async {
+      Ok(
+        Response::builder()
+          .status(StatusCode::NO_CONTENT)
+          .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+          .body(Body::empty())
+          .unwrap(),
+      )
+    });
+    let mux = builder.build();
+    let res = mux
+      .serve(
+        Request::builder()
+          .method(Method::OPTIONS)
+          .uri("/user/abc")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::NO_CONTENT, res.status());
+    assert_eq!(
+      "*",
+      res
+        .headers()
+        .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .unwrap()
+        .to_str()
+        .unwrap()
+    );
+
+    let res = mux
+      .serve(
+        Request::builder()
+          .method(Method::OPTIONS)
+          .uri("/user/abc/options")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::UNAUTHORIZED, res.status());
+    assert_eq!(
+      "treemux.rs",
+      res
+        .headers()
+        .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .unwrap()
+        .to_str()
+        .unwrap()
+    );
+
+    let builder = make_router();
+    let mux = builder.build();
+    let res = mux
+      .serve(
+        Request::builder()
+          .method(Method::OPTIONS)
+          .uri("/user/abc/options")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::UNAUTHORIZED, res.status());
+    assert_eq!(
+      "treemux.rs",
+      res
+        .headers()
+        .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .unwrap()
+        .to_str()
+        .unwrap()
+    );
+
+    let mut builder = make_router();
+    builder.global_options(|_req| async {
+      Ok(
+        Response::builder()
+          .status(StatusCode::NO_CONTENT)
+          .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+          .body(Body::empty())
+          .unwrap(),
+      )
+    });
+    let mux = builder.build();
+    let res = mux
+      .serve(
+        Request::builder()
+          .method(Method::POST)
+          .uri("/user/abc")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::METHOD_NOT_ALLOWED, res.status());
+    let mut allow: Vec<String> = res
+      .headers()
+      .get(http::header::ALLOW)
+      .unwrap()
+      .to_str()
+      .unwrap()
+      .split(", ")
+      .map(|v| v.to_string())
+      .collect();
+    allow.sort();
+
+    assert_eq!("DELETE, GET, HEAD, PUT", allow.join(", "));
+  }
+
+  #[tokio::test]
+  async fn test_panic() {
+    let mut router = Treemux::builder();
+    router.get("/abc", |_req| async {
+      panic!("expected");
+    });
+    let mux = router.build();
+    let res = mux
+      .serve(Request::builder().uri("/abc").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, res.status());
+
+    let mut router = Treemux::builder();
+    router.get("/abc", |_req| async {
+      panic!("expected");
+    });
+    router.handle_panics(|fut| async {
+      let wrapped = AssertUnwindSafe(fut).catch_unwind();
+      match wrapped.await {
+        Ok(response) => response,
+        Err(panic) => {
+          let error = Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("X-Result", HeaderValue::from_static("done"))
+            .body(Body::from(format!("{:?}", panic)))
+            .unwrap();
+          Ok(error)
+        }
+      }
+    });
+    let mux = router.build();
+    let res = mux
+      .serve(Request::builder().uri("/abc").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, res.status());
+    assert_eq!("done", res.headers().get("X-Result").unwrap().to_str().unwrap());
   }
 
   #[tokio::test]
