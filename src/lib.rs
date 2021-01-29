@@ -202,6 +202,8 @@ pub mod middlewares;
 pub(crate) mod path;
 mod serve;
 mod tree;
+use std::fmt::Display;
+
 pub use tree::{Param, Params};
 
 #[doc(hidden)]
@@ -225,11 +227,18 @@ pub use router::{Handler, Middleware, RouterBuilder, Treemux};
 /// is permanent. The big caveat here is that the RFC is relatively recent, and older
 /// browsers will not know what to do with it. Therefore its use is not recommended
 /// unless you really know what you're doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectBehavior {
   Redirect301,
   Redirect307,
   Redirect308,
   UseHandler,
+}
+
+impl Display for RedirectBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 // // test the code examples in README.md
