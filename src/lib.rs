@@ -236,9 +236,9 @@ pub enum RedirectBehavior {
 }
 
 impl Display for RedirectBehavior {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{:?}", self)
+  }
 }
 
 // // test the code examples in README.md
