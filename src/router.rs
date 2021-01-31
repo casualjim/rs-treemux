@@ -109,14 +109,14 @@ use std::{future::Future, net::SocketAddr};
 use std::{pin::Pin, str};
 
 pub trait RequestExt {
-  fn params(&self) -> Option<&Params>;
+  fn params(&self) -> &Params;
   fn remote_addr(&self) -> SocketAddr;
   fn app_context<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
 }
 
 impl RequestExt for Request<Body> {
-  fn params(&self) -> Option<&Params> {
-    self.extensions().get::<Params>()
+  fn params(&self) -> &Params {
+    self.extensions().get::<Params>().unwrap()
   }
 
   fn remote_addr(&self) -> SocketAddr {
@@ -1702,7 +1702,7 @@ mod tests {
   }
 
   async fn slug_handler(req: Request<Body>) -> Result<Response<Body>, http::Error> {
-    let val = req.params().and_then(|p| p.get("slug")).unwrap_or_default().to_string();
+    let val = req.params().get("slug").unwrap_or_default().to_string();
     Ok(Response::new(Body::from(val)))
   }
 
@@ -1785,21 +1785,13 @@ mod tests {
   }
 
   async fn param_handler(req: Request<Body>) -> Result<Response<Body>, http::Error> {
-    let val = req
-      .params()
-      .and_then(|p| p.get("param"))
-      .unwrap_or_default()
-      .to_string();
+    let val = req.params().get("param").unwrap_or_default().to_string();
     Ok(Response::new(Body::from(val)))
   }
 
   async fn ym_handler(req: Request<Body>) -> Result<Response<Body>, http::Error> {
-    let val1 = req.params().and_then(|p| p.get("year")).unwrap_or_default().to_string();
-    let val2 = req
-      .params()
-      .and_then(|p| p.get("month"))
-      .unwrap_or_default()
-      .to_string();
+    let val1 = req.params().get("year").unwrap_or_default().to_string();
+    let val2 = req.params().get("month").unwrap_or_default().to_string();
     Ok(Response::new(Body::from(format!("{} {}", val1, val2))))
   }
 
@@ -1882,7 +1874,7 @@ mod tests {
 
       for (route, _, _, _) in &test_cases {
         router.get(*route, |req| async move {
-          let param = req.params().unwrap().0.first();
+          let param = req.params().first();
           if let Some(param) = param {
             let v = format!("{}={}", param.key, param.value);
             Ok(Response::builder().status(StatusCode::OK).body(Body::from(v)).unwrap())

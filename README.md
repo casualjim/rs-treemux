@@ -1,6 +1,6 @@
 # Treemux
 
-[![Documentation](https://img.shields.io/badge/docs-0.1.1-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.1.1)
+[![Documentation](https://img.shields.io/badge/docs-0.1.1-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.3.1)
 [![Version](https://img.shields.io/crates/v/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 [![License](https://img.shields.io/crates/l/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 [![Actions](https://img.shields.io/github/workflow/status/casualjim/rs-treemux/Rust/master?style=for-the-badge)](https://github.com/casualjim/rs-treemux/actions)
@@ -9,7 +9,7 @@ Treemux is a lightweight high performance HTTP request router.
 
 This router supports variables in the routing pattern and matches against the request method. It also scales very well.
 
-The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching. Internally, it uses the [matchit](https://github.com/ibraheemdev/matchit) package.
+The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching.
 
 Treemux started as a fork of [httprouter-rs](https://github.com/ibraheemdev/httprouter-rs) by @ibraheemdev. And is just a learning project for me at the moment, to get more familiar with hyper and tower services.
 If you're familiar with the go world, this is the equivalent of [httptreemux](https://github.com/dimfeld/httptreemux) from @dimfeld vs [httprouter](https://github.com/julienschmidt/httprouter) from @julienschmidt. It also adds some middleware support.
@@ -22,7 +22,7 @@ If you're familiar with the go world, this is the equivalent of [httptreemux](ht
 
 **Parameters in your routing pattern:** Stop parsing the requested URL path, just give the path segment a name and the router delivers the dynamic value to you. Because of the design of the router, path parameters are very cheap.
 
-**High Performance:** Treemux relies on a tree structure which makes heavy use of *common prefixes*, it is basically a [radix tree](https://en.wikipedia.org/wiki/Radix_tree). This makes lookups extremely fast. Internally, it uses the [matchit](https://github.com/ibraheemdev/matchit) package.
+**High Performance:** Treemux relies on a tree structure which makes heavy use of *common prefixes*, it is basically a [radix tree](https://en.wikipedia.org/wiki/Radix_tree). This makes lookups extremely fast.
 
 Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.not_found) and  [`MethodNotAllowed`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.method_not_allowed) handlers** , [**serve static files**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#method.serve_files), and [**automatically respond to OPTIONS requests**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.global_options)
 
@@ -31,7 +31,7 @@ Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/
 Here is a simple example:
 
 ```rust,no_run
-use treemux::{Treemux, RouterBuilder, Params};
+use treemux::{Treemux, RouterBuilder, Params, RequestExt};
 use treemux::middlewares;
 use std::convert::Infallible;
 use hyper::{Request, Response, Body};
@@ -42,8 +42,8 @@ async fn index(_: Request<Body>) -> Result<Response<Body>, Error> {
 }
 
 async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
-  let params = req.extensions().get::<Params>().unwrap();
-  Ok(Response::new(format!("Hello, {}", params.get("user").unwrap()).into()))
+  let user_name = req.params().get("user").unwrap();
+  Ok(Response::new(format!("Hello, {}", user_name).into()))
 }
 
 #[tokio::main]
@@ -61,7 +61,7 @@ async fn main() {
 
 ### Named parameters
 
-As you can see, `:user` is a *named parameter*. The values are accessible via `req.extensions().get::<Params>()`.
+As you can see, `:user` is a *named parameter*. The values are accessible via `req.params()` which is provided by the RequestExt trait.
 
 Named parameters only match a single path segment:
 

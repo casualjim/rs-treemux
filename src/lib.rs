@@ -1,15 +1,15 @@
 //! # Treemux
 //!
-//! [![Documentation](https://img.shields.io/badge/docs-0.2.0-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.2.0)
+//! [![Documentation](https://img.shields.io/badge/docs-0.3.0-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.3.0)
 //! [![Version](https://img.shields.io/crates/v/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 //! [![License](https://img.shields.io/crates/l/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
-//! [![Actions](https://img.shields.io/github/workflow/status/ibraheemdev/treemux-rs/Rust/master?style=for-the-badge)](https://github.com/ibraheemdev/treemux-rs/actions)
+//! [![Actions](https://img.shields.io/github/workflow/status/casualjim/rs-treemux/Rust/master?style=for-the-badge)](https://github.com/casualjim/rs-treemux/actions)
 //!
 //! Treemux is a lightweight high performance HTTP request router.
 //!
 //! This router supports variables in the routing pattern and matches against the request method. It also scales very well.
 //!
-//! The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching. Internally, it uses the [matchit](https://github.com/ibraheemdev/matchit) package.
+//! The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching.
 //!
 //! ## Features
 //!
@@ -19,7 +19,7 @@
 //!
 //! **Parameters in your routing pattern:** Stop parsing the requested URL path, just give the path segment a name and the router delivers the dynamic value to you. Because of the design of the router, path parameters are very cheap.
 //!
-//! **High Performance:** Treemux relies on a tree structure which makes heavy use of *common prefixes*, it is basically a [radix tree](https://en.wikipedia.org/wiki/Radix_tree). This makes lookups extremely fast. Internally, it uses the [matchit](https://github.com/ibraheemdev/matchit) package.
+//! **High Performance:** Treemux relies on a tree structure which makes heavy use of *common prefixes*, it is basically a [radix tree](https://en.wikipedia.org/wiki/Radix_tree). This makes lookups extremely fast.
 //!
 //! Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.not_found) and  [`MethodNotAllowed`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.method_not_allowed) handlers** , [**serve static files**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#method.serve_files), and [**automatically respond to OPTIONS requests**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.global_options)
 //!
@@ -210,7 +210,7 @@ pub use tree::{Param, Params};
 pub mod router;
 
 #[doc(inline)]
-pub use router::{Handler, Middleware, RouterBuilder, Treemux};
+pub use router::*;
 
 /// Sets the behavior when the router redirects the request to the
 /// canonical version of the requested URL using `redirect_trailing_slash` or `redirect_clean`.

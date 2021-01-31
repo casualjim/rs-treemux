@@ -146,6 +146,10 @@ impl Params {
   pub fn len(&self) -> usize {
     self.0.len()
   }
+
+  pub fn first(&self) -> Option<&Param> {
+    self.0.first()
+  }
 }
 
 /// A node in radix tree ordered by priority.
