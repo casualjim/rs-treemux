@@ -1,6 +1,6 @@
 use hyper::Method;
 use percent_encoding::percent_decode_str;
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, iter::FromIterator, ops::Index, vec};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, iter::FromIterator, ops::Index, sync::Arc, vec};
 
 /// The response returned when getting the value for a specific path with
 /// [`Node::search`](crate::tree::Node::search)
@@ -18,7 +18,7 @@ pub struct Match<'a, V> {
   pub is_catch_all: bool,
   /// The route parameters. See [parameters](/index.html#parameters) for more details.
   param_names: Vec<Cow<'a, str>>,
-  pub leaf_handler: &'a HashMap<Method, V>,
+  pub leaf_handler: Arc<HashMap<Method, V>>,
   /// The route parameters. See [parameters](/index.html#parameters) for more details.
   pub parameters: Params,
 }
@@ -28,6 +28,23 @@ impl<'a, V> Match<'a, V> {
   pub fn update_parameters(&mut self) {
     self.parameters = self.param_names.clone().into_iter().zip(self.params.clone()).collect();
   }
+}
+
+/// The response returned when getting the value for a specific path with
+/// [`Node::search`](crate::tree::Node::search)
+#[derive(Debug, Clone)]
+pub struct LookupResult<V: Clone> {
+  /// The value stored under the matched node.
+  pub value: Option<V>,
+  /// The route path
+  pub path: String,
+  pub pattern: String,
+  pub implicit_head: bool,
+  pub add_slash: bool,
+  pub is_catch_all: bool,
+  pub leaf_handler: Arc<HashMap<Method, V>>,
+  /// The route parameters. See [parameters](/index.html#parameters) for more details.
+  pub parameters: Params,
 }
 
 /// Param is a single URL parameter, consisting of a key and a value.
@@ -262,6 +279,26 @@ where
     );
   }
 
+  pub fn lookup<P: AsRef<str>>(&self, method: Method, path: P) -> Option<LookupResult<V>> {
+    let pth: Cow<str> = path.as_ref().to_string().into();
+    let mtc = self
+      .internal_search(&method, strip_start_slash(pth.clone()), pth)
+      .map(|mut v| {
+        v.update_parameters();
+        v
+      });
+    mtc.map(|m| LookupResult {
+      value: m.value.cloned(),
+      path: m.path.to_string(),
+      pattern: m.pattern.to_string(),
+      implicit_head: m.implicit_head,
+      add_slash: m.add_slash,
+      is_catch_all: m.is_catch_all,
+      leaf_handler: m.leaf_handler.clone(),
+      parameters: m.parameters,
+    })
+  }
+
   pub fn search<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Option<Match<'b, V>> {
     let pth: Cow<str> = path.as_ref().to_string().into();
     self
@@ -292,7 +329,7 @@ where
         param_names: self.leaf_wildcard_names.clone().unwrap_or_default(),
         implicit_head: self.implicit_head,
         add_slash: self.add_slash,
-        leaf_handler: &self.leaf_handler,
+        leaf_handler: Arc::new(self.leaf_handler.clone()),
         parameters: Params::default(),
         is_catch_all: self.is_catch_all,
       });
@@ -369,7 +406,7 @@ where
           path: self.path.clone(),
           add_slash: catch_all_child.add_slash,
           implicit_head: catch_all_child.implicit_head,
-          leaf_handler: &catch_all_child.leaf_handler,
+          leaf_handler: Arc::new(catch_all_child.leaf_handler.clone()),
           parameters: Params::default(),
           is_catch_all: catch_all_child.is_catch_all,
         });

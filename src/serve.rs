@@ -37,7 +37,7 @@ where
   fn call(&mut self, conn: &AddrStream) -> Self::Future {
     let service = RouterService {
       app_context: self.0.clone(),
-      router: &self.1,
+      router: &mut self.1,
       remote_addr: conn.remote_addr(),
     };
 
@@ -65,7 +65,7 @@ where
   fn call(&mut self, conn: &TlsStream<TcpStream>) -> Self::Future {
     let service = RouterService {
       app_context: self.0.clone(),
-      router: &self.1,
+      router: &mut self.1,
       remote_addr: conn.get_ref().get_ref().get_ref().peer_addr().unwrap(),
     };
 
@@ -93,7 +93,7 @@ where
   fn call(&mut self, conn: &RustlsStream<TcpStream>) -> Self::Future {
     let service = RouterService {
       app_context: self.0.clone(),
-      router: &self.1,
+      router: &mut self.1,
       remote_addr: conn.get_ref().0.peer_addr().unwrap(),
     };
 
@@ -109,7 +109,7 @@ pub struct RouterService<T>
 where
   T: Send + Sync + 'static,
 {
-  router: *const Treemux,
+  router: *mut Treemux,
   app_context: Arc<T>,
   remote_addr: SocketAddr,
 }
@@ -128,10 +128,10 @@ where
   }
 
   fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-    let router = unsafe { &*self.router };
+    let router = unsafe { &mut *self.router };
     req.extensions_mut().insert(self.app_context.clone());
     req.extensions_mut().insert(self.remote_addr);
-    let fut = router.serve(req);
+    let fut = router.call(req);
     Box::pin(fut)
   }
 }

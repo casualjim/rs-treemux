@@ -207,10 +207,10 @@ use std::fmt::Display;
 pub use tree::{Param, Params};
 
 #[doc(hidden)]
-pub mod router;
+pub mod mux;
 
 #[doc(inline)]
-pub use router::*;
+pub use mux::*;
 
 /// Sets the behavior when the router redirects the request to the
 /// canonical version of the requested URL using `redirect_trailing_slash` or `redirect_clean`.

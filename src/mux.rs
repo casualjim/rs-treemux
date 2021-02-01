@@ -90,25 +90,23 @@
 //!  let third_value = &params[2].value; // the value of the 3rd parameter
 //! ```
 
-use crate::{
-  serve::MakeRouterService,
-  tree::{HandlerConfig, Match, Node, Params},
-  RedirectBehavior,
-};
+use std::{any::Any, borrow::Cow, collections::HashMap, net::SocketAddr, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
-use futures::FutureExt;
-use header::HeaderValue;
+use futures::{Future, FutureExt};
+
 use hyper::{
-  header::{self, CONTENT_TYPE, LOCATION},
+  header::{HeaderValue, ALLOW, CONTENT_TYPE, LOCATION},
   http, Body, Method, Request, Response, StatusCode,
 };
-use std::{any::Any, borrow::Cow, collections::HashMap, fmt::Display, panic::AssertUnwindSafe};
-use std::{
-  fmt::Debug,
-  sync::{Arc, Mutex},
+use std::sync::Mutex;
+use tower_layer::{layer_fn, Identity, Layer, Stack};
+use tower_service::Service;
+
+use crate::{
+  serve::MakeRouterService,
+  tree::{HandlerConfig, LookupResult, Node},
+  Params, RedirectBehavior,
 };
-use std::{future::Future, net::SocketAddr};
-use std::{pin::Pin, str};
 
 pub trait RequestExt {
   fn params(&self) -> &Params;
@@ -134,68 +132,149 @@ impl RequestExt for Request<Body> {
   }
 }
 
-pub trait Middleware: Send + Sync + 'static {
-  type Input;
-  type Output;
+pub trait RouterBuilder {
+  /// Insert a value into the router for a specific path indexed by a key.
+  /// ```rust
+  /// use treemux::{Treemux, RouterBuilder};
+  /// use hyper::{Response, Body, Method, Request};
+  ///
+  /// let mut router = Treemux::builder();
+  /// router.handle(Method::GET, "/teapot", |_: Request<Body>| {
+  ///     async { Ok(Response::new(Body::from("I am a teapot!"))) }
+  /// });
+  /// let router: Treemux = router.into();
+  /// ```
+  fn handle<P, H>(&self, method: Method, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Into<RequestHandler>;
 
-  fn chain(&self, input: Self::Input) -> Self::Output;
-}
-
-impl<F> Middleware for F
-where
-  F: Fn(Handler) -> Handler + Send + Sync + 'static,
-{
-  type Input = Handler;
-
-  type Output = Handler;
-
-  fn chain(&self, input: Self::Input) -> Self::Output {
-    self(input)
-  }
-}
-
-pub type Handler = Box<dyn Fn(Request<Body>) -> HandlerReturn + Send + Sync + 'static>;
-pub type HandlerReturn = Pin<Box<dyn Future<Output = Result<Response<Body>, http::Error>> + Send + 'static>>;
-pub type MethodNotAllowedHandler = Box<dyn Fn(Request<Body>, Vec<Method>) -> HandlerReturn + Send + Sync + 'static>;
-pub type PanicHandler = Box<dyn Fn(Box<dyn Any + Send>) -> HandlerReturn + Send + Sync + 'static>;
-
-#[derive(Clone)]
-struct Route {
-  pattern: String,
-  handler: Arc<Handler>,
-}
-
-impl std::fmt::Debug for Route {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("Route")
-      .field("pattern", &self.pattern)
-      .field("handler", &"{{closure}}".to_owned())
-      .finish()
-  }
-}
-
-impl Route {
-  fn new<P, H, R>(pattern: P, handler: H) -> Route
+  /// Register a handler for `GET` requests
+  fn get<P, H, R>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
     H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
   {
-    let handler: Handler = Box::new(move |req: Request<hyper::Body>| Box::pin(handler(req)));
-    Route {
-      pattern: pattern.into(),
-      handler: Arc::new(handler),
+    self.handle(Method::GET, path, handler);
+  }
+
+  /// Register a handler for `HEAD` requests
+  fn head<P, H, R>(&mut self, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
+  {
+    self.handle(Method::HEAD, path, handler);
+  }
+
+  /// Register a handler for `OPTIONS` requests
+  fn options<P, H, R>(&mut self, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
+  {
+    self.handle(Method::OPTIONS, path, handler);
+  }
+
+  /// Register a handler for `POST` requests
+  fn post<P, H, R>(&mut self, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
+  {
+    self.handle(Method::POST, path, handler);
+  }
+
+  /// Register a handler for `PUT` requests
+  fn put<P, H, R>(&mut self, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
+  {
+    self.handle(Method::PUT, path, handler);
+  }
+
+  /// Register a handler for `PATCH` requests
+  fn patch<P, H, R>(&mut self, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
+  {
+    self.handle(Method::PATCH, path, handler);
+  }
+
+  /// Register a handler for `DELETE` requests
+  fn delete<P, H, R>(&mut self, path: P, handler: H)
+  where
+    P: Into<String>,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = ResponseResult> + Send + 'static,
+  {
+    self.handle(Method::DELETE, path, handler);
+  }
+}
+
+pub type HttpResult<T> = Result<T, http::Error>;
+pub type ResponseResult = HttpResult<Response<Body>>;
+pub type ResponseFut = Pin<Box<dyn Future<Output = ResponseResult> + Send + 'static>>;
+pub type Handler = Box<dyn Fn(Request<Body>) -> ResponseFut + Send + Sync>;
+type HandlerArc = Arc<Handler>;
+pub type PanicHandler = Arc<dyn Fn(Box<dyn Any + Send>) -> ResponseFut + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub struct AllowedMethod(Vec<Method>);
+impl AllowedMethod {
+  pub fn methods(&self) -> &[Method] {
+    &self.0
+  }
+}
+
+#[derive(Clone)]
+pub struct RequestHandler {
+  cb: HandlerArc,
+}
+
+impl<F, R> From<F> for RequestHandler
+where
+  F: Fn(Request<Body>) -> R + Send + Sync + 'static,
+  R: Future<Output = ResponseResult> + Send + 'static,
+{
+  fn from(f: F) -> Self {
+    RequestHandler {
+      cb: Arc::new(Box::new(move |req| Box::pin(f(req)))),
     }
   }
 }
 
-pub struct GroupBuilder<'a> {
-  prefix: Cow<'a, str>,
-  inner: &'a Builder,
-  chain: Arc<dyn Middleware<Input = Handler, Output = Handler>>,
+impl Service<Request<Body>> for RequestHandler {
+  type Response = Response<Body>;
+
+  type Error = http::Error;
+
+  type Future = ResponseFut;
+
+  fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    std::task::Poll::Ready(Ok(()))
+  }
+
+  fn call(&mut self, req: Request<Body>) -> Self::Future {
+    (self.cb.clone())(req)
+  }
 }
 
-impl<'a> GroupBuilder<'a> {
+pub struct GroupBuilder<'a, M, S> {
+  prefix: Cow<'a, str>,
+  inner: &'a Builder<S>,
+  stack: M,
+}
+
+impl<'a, M, S> GroupBuilder<'a, M, S> {
   pub fn extend<P: Into<Cow<'static, str>>, B: Into<Treemux>>(&self, path: P, routes: B) {
     let p: Cow<str> = path.into();
     if p.is_empty() {
@@ -210,7 +289,7 @@ impl<'a> GroupBuilder<'a> {
     )
   }
 
-  pub fn scope<'b, P: Into<Cow<'static, str>>>(&'b mut self, path: P) -> GroupBuilder<'b> {
+  pub fn scope<P: Into<Cow<'static, str>>>(self, path: P) -> GroupBuilder<'a, M, S> {
     let p: Cow<str> = path.into();
     if p.is_empty() {
       panic!("Scope path must not be empty");
@@ -222,79 +301,49 @@ impl<'a> GroupBuilder<'a> {
     GroupBuilder {
       prefix: (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
       inner: self.inner,
-      chain: self.chain.clone(),
+      stack: self.stack,
     }
   }
 
-  pub fn middleware<M>(&mut self, middleware: M)
+  pub fn middleware<N>(self, middleware: N) -> GroupBuilder<'a, Stack<N, M>, S>
   where
-    M: Middleware<Input = Handler, Output = Handler>,
+    N: Layer<S::Service, Service = S::Service>,
+    M: Layer<S::Service, Service = S::Service>,
+    S: Layer<RequestHandler, Service = RequestHandler>,
   {
-    let previous = self.chain.clone();
-    self.chain = Arc::new(move |handler| previous.chain(middleware.chain(handler)));
+    GroupBuilder {
+      prefix: self.prefix,
+      inner: self.inner,
+      stack: Stack::new(middleware, self.stack),
+    }
   }
 }
 
-impl<'a> RouterBuilder for GroupBuilder<'a> {
-  fn handle<P, H, R>(&self, method: Method, path: P, handler: H)
+impl<'a, M, S> RouterBuilder for GroupBuilder<'a, M, S>
+where
+  S: Layer<RequestHandler, Service = RequestHandler>,
+  M: Layer<RequestHandler, Service = RequestHandler>,
+{
+  fn handle<P, H>(&self, method: Method, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     let path: Cow<str> = path.into().into();
     let path: Cow<str> = format!("{}{}", self.prefix, path).into();
     check_path(path.clone());
 
-    self.inner.add_route(method, path, handler)
+    self.inner.add_route(method, path, self.stack.layer(handler.into()))
   }
 }
 
-async fn default_not_found() -> Result<Response<Body>, http::Error> {
-  Response::builder()
-    .status(StatusCode::NOT_FOUND)
-    .body(Body::from(format!("{}", StatusCode::NOT_FOUND)))
-    .map_err(Into::into)
-}
-
-async fn default_method_not_allowed(allow: Vec<Method>) -> Result<Response<Body>, http::Error> {
-  Response::builder()
-    .status(StatusCode::METHOD_NOT_ALLOWED)
-    .header(
-      header::ALLOW,
-      allow
-        .iter()
-        .map(|v| v.as_str().to_string())
-        .collect::<Vec<String>>()
-        .join(", "),
-    )
-    .body(Body::from(format!("{}", StatusCode::METHOD_NOT_ALLOWED)))
-    .map_err(Into::into)
-}
-
-async fn handle_panics(
-  fut: impl Future<Output = Result<Response<Body>, http::Error>>,
-) -> Result<Response<Body>, http::Error> {
-  let wrapped = AssertUnwindSafe(fut).catch_unwind();
-  match wrapped.await {
-    Ok(response) => response,
-    Err(panic) => {
-      let error = Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::from(format!("{:?}", panic)))
-        .unwrap();
-      Ok(error)
-    }
-  }
-}
-
-pub struct Builder {
+pub struct Builder<M> {
   path: Cow<'static, str>,
-  root: Arc<Mutex<Node<'static, Route>>>,
-  chain: Arc<dyn Middleware<Input = Handler, Output = Handler>>,
-  handle_not_found: Option<Handler>,
-  handle_method_not_allowed: Option<MethodNotAllowedHandler>,
-  handle_global_options: Option<Handler>,
+  root: Arc<Mutex<Node<'static, RequestHandler>>>,
+  stack: M,
+  handle_not_found: Option<RequestHandler>,
+  handle_method_not_allowed: Option<RequestHandler>,
+  handle_global_options: Option<RequestHandler>,
   handle_panic: Option<PanicHandler>,
   /// Allows the router to use the `GET` handler to respond to
   /// `HEAD` requests if no explicit `HEAD` handler has been added for the
@@ -328,12 +377,12 @@ pub struct Builder {
   pub escape_added_routes: bool,
 }
 
-impl Default for Builder {
+impl Default for Builder<Identity> {
   fn default() -> Self {
     Self {
       path: "".into(),
       root: Arc::new(Mutex::new(Node::new())),
-      chain: Arc::new(|handler| handler),
+      stack: Identity::new(),
       handle_not_found: None,
       handle_method_not_allowed: None,
       handle_global_options: None,
@@ -349,7 +398,7 @@ impl Default for Builder {
   }
 }
 
-impl Builder {
+impl<M> Builder<M> {
   pub fn extend<P: Into<Cow<'static, str>>, B: Into<Treemux>>(&self, path: P, routes: B) {
     let p: Cow<str> = path.into();
     if p.is_empty() {
@@ -364,7 +413,10 @@ impl Builder {
     )
   }
 
-  pub fn scope<'b, P: Into<Cow<'b, str>>>(&'b mut self, path: P) -> GroupBuilder<'b> {
+  pub fn scope<'b, P: Into<Cow<'b, str>>>(&'b mut self, path: P) -> GroupBuilder<'b, Identity, M>
+  where
+    M: Layer<RequestHandler, Service = RequestHandler>,
+  {
     let p: Cow<str> = path.into();
     if p.is_empty() {
       panic!("Scope path must not be empty");
@@ -375,55 +427,36 @@ impl Builder {
     GroupBuilder {
       prefix: (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
       inner: self,
-      chain: self.chain.clone(),
+      stack: Identity::new(),
     }
   }
 
-  pub fn middleware<M>(&mut self, middleware: M)
+  pub fn not_found<H: Into<RequestHandler>>(&mut self, handler: H)
   where
-    M: Middleware<Input = Handler, Output = Handler>,
+    M: Layer<RequestHandler, Service = RequestHandler>,
   {
-    let previous = self.chain.clone();
-    self.chain = Arc::new(move |handler| previous.chain(middleware.chain(handler)));
-  }
-
-  /// Register a handler for when there is no match
-  pub fn not_found<H, R>(&mut self, handler: H)
-  where
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    self.handle_not_found = Some(req_handler);
+    let rh: RequestHandler = handler.into();
+    let hn = self.stack.layer(rh);
+    self.handle_not_found = Some(hn);
   }
 
   /// Register a handler for when the path matches a different method than the requested one
-  pub fn method_not_allowed<H, R>(&mut self, handler: H)
+  pub fn method_not_allowed<H: Into<RequestHandler>>(&mut self, handler: H)
   where
-    H: Fn(Request<Body>, Vec<Method>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+    M: Layer<RequestHandler, Service = RequestHandler>,
   {
-    let chain = self.chain.clone();
-    let handler = Arc::new(handler);
-    let req_handler: MethodNotAllowedHandler = Box::new(move |req, allowed| {
-      let handler = handler.clone();
-      Box::pin(chain
-        .clone()
-        .chain(Box::new(move |rr| Box::pin(handler(rr, allowed.clone()))))(
-        req
-      ))
-    });
-    self.handle_method_not_allowed = Some(req_handler);
+    let rh: RequestHandler = handler.into();
+    let hn = self.stack.layer(rh);
+    self.handle_method_not_allowed = Some(hn);
   }
 
   /// Register a handler for when the path matches a different method than the requested one
-  pub fn global_options<H, R>(&mut self, handler: H)
+  pub fn global_options<H: Into<RequestHandler>>(&mut self, handler: H)
   where
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+    M: Layer<RequestHandler, Service = RequestHandler>,
   {
-    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    self.handle_global_options = Some(req_handler);
+    let req_handler = handler.into();
+    self.handle_global_options = Some(self.stack.layer(req_handler));
   }
 
   pub fn handle_panics<H, R>(&mut self, handler: H)
@@ -431,29 +464,68 @@ impl Builder {
     R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
     H: Fn(Box<dyn Any + Send>) -> R + Send + Sync + 'static,
   {
-    let ph: PanicHandler = Box::new(move |fut| Box::pin(handler(fut)));
+    let ph: PanicHandler = Arc::new(move |fut| Box::pin(handler(fut)));
     self.handle_panic = Some(ph);
   }
 
-  fn build(self) -> Treemux {
-    let root = Arc::try_unwrap(self.root)
-      .map_err(|_| ())
-      .unwrap()
-      .into_inner()
-      .unwrap();
-    let mut result = Treemux::new(root);
-    result.handle_not_found = self.handle_not_found.map(Arc::new);
-    result.handle_method_not_allowed = self.handle_method_not_allowed.map(Arc::new);
-    result.handle_global_options = self.handle_global_options.map(Arc::new);
-    result.handle_panic = self.handle_panic;
-    result.head_can_use_get = self.head_can_use_get;
-    result.redirect_trailing_slash = self.redirect_trailing_slash;
-    result.redirect_clean_path = self.redirect_clean_path;
-    result.redirect_behavior = self.redirect_behavior;
-    result.redirect_method_behavior = self.redirect_method_behavior;
-    result.remove_catch_all_trailing_slash = self.remove_catch_all_trailing_slash;
-    result.escape_added_routes = self.escape_added_routes;
-    result
+  pub fn middleware<N>(self, middleware: N) -> Builder<Stack<N, M>>
+  where
+    N: Layer<M::Service, Service = M::Service>,
+    M: Layer<RequestHandler, Service = RequestHandler>,
+  {
+    Builder {
+      handle_not_found: self.handle_not_found,
+      handle_method_not_allowed: self.handle_method_not_allowed,
+      stack: Stack::new(middleware, self.stack),
+      root: self.root,
+      redirect_trailing_slash: self.redirect_trailing_slash,
+      path: self.path,
+      handle_global_options: self.handle_global_options,
+      handle_panic: self.handle_panic,
+      head_can_use_get: self.head_can_use_get,
+      redirect_clean_path: self.redirect_clean_path,
+      redirect_behavior: self.redirect_behavior,
+      redirect_method_behavior: self.redirect_method_behavior,
+      remove_catch_all_trailing_slash: self.remove_catch_all_trailing_slash,
+      escape_added_routes: self.escape_added_routes,
+    }
+  }
+
+  fn add_route<P: Into<String>, F>(&self, method: Method, pattern: P, handler: F)
+  where
+    M: Layer<RequestHandler, Service = RequestHandler>,
+    F: Into<RequestHandler>,
+  {
+    let pstr = pattern.into();
+    let patn: Cow<str> = pstr.into();
+
+    if patn.is_empty() {
+      panic!("Cannot map an empty path");
+    }
+
+    let mut root = self.root.lock().unwrap();
+    let (add_slash, patn) = if patn.len() > 1 && patn.ends_with('/') && self.redirect_trailing_slash {
+      (true, patn.strip_suffix('/').unwrap_or_default().to_string().into())
+    } else {
+      (false, patn)
+    };
+
+    let rh: RequestHandler = handler.into();
+    let mut config = HandlerConfig::new(method.clone(), patn.clone(), self.stack.layer(rh.clone()));
+    config.add_slash = add_slash;
+    config.head_can_use_get = self.head_can_use_get;
+    root.insert(config);
+
+    if self.escape_added_routes {
+      let u: http::Uri = patn.clone().parse().unwrap();
+      let escaped_path: Cow<str> = u.path().to_owned().into();
+      if escaped_path != patn {
+        let mut hcfg = HandlerConfig::new(method, escaped_path.clone(), self.stack.layer(rh));
+        hcfg.add_slash = add_slash;
+        hcfg.head_can_use_get = self.head_can_use_get;
+        root.insert(hcfg);
+      }
+    }
   }
 
   /// Converts the `Treemux` into a `Service` which you can serve directly with `Hyper`.
@@ -504,45 +576,26 @@ impl Builder {
     MakeRouterService(Arc::new(()), self.build())
   }
 
-  fn add_route<H, R>(&self, method: Method, path: Cow<'static, str>, handler: H)
-  where
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    if path.is_empty() {
-      panic!("Cannot map an empty path");
-    }
+  fn build(self) -> Treemux {
+    let root = Arc::try_unwrap(self.root)
+      .map_err(|_| ())
+      .unwrap()
+      .into_inner()
+      .unwrap();
 
-    let mut root = self.root.lock().unwrap();
-    let (add_slash, path) = if path.len() > 1 && path.ends_with('/') && self.redirect_trailing_slash {
-      (true, path.strip_suffix('/').unwrap_or_default().to_string().into())
-    } else {
-      (false, path)
-    };
-
-    let req_handler = self.chain.clone().chain(Box::new(move |req| Box::pin(handler(req))));
-    let route = Route::new(path.clone(), req_handler);
-    let mut hcfg = HandlerConfig::new(method.clone(), path.clone(), route.clone());
-    hcfg.add_slash = add_slash;
-    hcfg.head_can_use_get = self.head_can_use_get;
-    root.insert(hcfg);
-
-    if self.escape_added_routes {
-      let u: http::Uri = path.clone().parse().unwrap();
-      let escaped_path: Cow<str> = u.path().to_owned().into();
-      if escaped_path != path {
-        let mut hcfg = HandlerConfig::new(
-          method,
-          escaped_path.clone(),
-          Route {
-            pattern: escaped_path.to_string(),
-            handler: route.handler.clone(),
-          },
-        );
-        hcfg.add_slash = add_slash;
-        hcfg.head_can_use_get = self.head_can_use_get;
-        root.insert(hcfg);
-      }
+    Treemux {
+      root,
+      handle_not_found: self.handle_not_found,
+      handle_method_not_allowed: self.handle_method_not_allowed,
+      handle_global_options: self.handle_global_options,
+      handle_panic: self.handle_panic,
+      head_can_use_get: self.head_can_use_get,
+      redirect_trailing_slash: self.redirect_trailing_slash,
+      redirect_clean_path: self.redirect_clean_path,
+      redirect_behavior: self.redirect_behavior,
+      redirect_method_behavior: self.redirect_method_behavior,
+      remove_catch_all_trailing_slash: self.remove_catch_all_trailing_slash,
+      escape_added_routes: self.escape_added_routes,
     }
   }
 }
@@ -553,12 +606,14 @@ fn check_path(path: Cow<str>) {
   }
 }
 
-impl RouterBuilder for Builder {
-  fn handle<P, H, R>(&self, method: Method, path: P, handler: H)
+impl<M> RouterBuilder for Builder<M>
+where
+  M: Layer<RequestHandler, Service = RequestHandler>,
+{
+  fn handle<P, H>(&self, method: Method, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     let path: Cow<str> = path.into().into();
     check_path(path.clone());
@@ -568,13 +623,13 @@ impl RouterBuilder for Builder {
 }
 
 pub struct Treemux {
-  root: Node<'static, Route>,
-  handle_not_found: Option<Arc<Handler>>,
-  handle_method_not_allowed: Option<Arc<MethodNotAllowedHandler>>,
-  handle_global_options: Option<Arc<Handler>>,
+  handle_not_found: Option<RequestHandler>,
+  handle_method_not_allowed: Option<RequestHandler>,
+  root: Node<'static, RequestHandler>,
+  redirect_trailing_slash: bool,
+  handle_global_options: Option<RequestHandler>,
   handle_panic: Option<PanicHandler>,
   head_can_use_get: bool,
-  redirect_trailing_slash: bool,
   redirect_clean_path: bool,
   redirect_behavior: Option<RedirectBehavior>,
   redirect_method_behavior: HashMap<Method, RedirectBehavior>,
@@ -582,7 +637,27 @@ pub struct Treemux {
   escape_added_routes: bool,
 }
 
-impl Debug for Treemux {
+pub fn middleware_fn<F, R, Q>(middleware: F) -> impl Layer<RequestHandler, Service = RequestHandler>
+where
+  R: Fn(Request<Body>) -> Q,
+  Q: Future<Output = ResponseResult> + Send + 'static,
+  F: Fn(Handler) -> R + Send + Sync + 'static,
+{
+  let mw = Arc::new(middleware);
+  layer_fn(move |svc: RequestHandler| {
+    let middleware = mw.clone();
+    let handle = svc.cb.clone();
+    RequestHandler {
+      cb: Arc::new(Box::new(move |req| {
+        let handle = handle.clone();
+        let rh = Box::new(move |ir| handle(ir));
+        Box::pin(middleware(rh)(req))
+      })),
+    }
+  })
+}
+
+impl std::fmt::Debug for Treemux {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Treemux")
       .field("handle_not_found", &self.handle_not_found.is_some())
@@ -601,21 +676,14 @@ impl Debug for Treemux {
   }
 }
 
-impl Display for Treemux {
+impl std::fmt::Display for Treemux {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.write_str(&self.root.dump_tree("", ""))
   }
 }
 
 impl Treemux {
-  fn new(root: Node<'static, Route>) -> Self {
-    Self {
-      root,
-      ..Default::default()
-    }
-  }
-
-  pub fn builder() -> Builder {
+  pub fn builder() -> Builder<Identity> {
     Builder::default()
   }
 
@@ -634,13 +702,13 @@ impl Treemux {
   /// let res = router.lookup(&Method::GET, "/home").unwrap();
   /// assert!(res.1.is_empty());
   /// ```
-  pub fn lookup<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<(Arc<Handler>, Params), bool> {
+  pub fn lookup<'b, P: AsRef<str>>(&'b self, method: &'b Method, path: P) -> Result<(RequestHandler, Params), bool> {
     self
       .root
       .search(method, path)
       .map(|m| {
         let vv = m.value.unwrap();
-        Ok((vv.handler.clone(), m.parameters.clone()))
+        Ok((vv.clone(), m.parameters.clone()))
       })
       .unwrap_or(Err(false))
   }
@@ -693,38 +761,221 @@ impl Treemux {
     MakeRouterService(Arc::new(()), self)
   }
 
-  /// An asynchronous function from a `Request` to a `Response`. You will generally not need to use
-  /// this function directly, and instead use
-  /// [`Treemux::into_service`](crate::Treemux::into_service). However, it may be useful when
-  /// incorporating the router into a larger service.
-  /// ```rust,no_run
-  /// # use treemux::{Treemux, RouterBuilder};
-  /// # use hyper::service::{make_service_fn, service_fn};
-  /// # use hyper::{Request, Body, Server};
-  /// # use std::convert::Infallible;
-  /// # use std::sync::Arc;
-  ///
-  /// # async fn run() {
-  /// let mut router = Treemux::builder();
-  ///
-  /// let router: Arc<Treemux> = Arc::new(router.into());
-  ///
-  /// let make_svc = make_service_fn(move |_| {
-  ///     let router = router.clone();
-  ///     async move {
-  ///         Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-  ///             let router = router.clone();
-  ///             async move { router.serve(req).await }
-  ///         }))
-  ///     }
-  /// });
-  ///
-  /// let server = Server::bind(&([127, 0, 0, 1], 3000).into())
-  ///     .serve(make_svc)
-  ///     .await;
-  /// # }
-  /// ```
-  pub async fn serve(&self, req: Request<Body>) -> Result<Response<Body>, http::Error> {
+  // pub async fn serve(&mut self, req: Request<Body>) -> ResponseResult {
+  //   let method = req.method().clone();
+  //   let mut path = req.uri().path().to_string();
+
+  //   let has_trailing_slash = path.len() > 1 && path.ends_with('/');
+  //   if has_trailing_slash && self.redirect_trailing_slash {
+  //     path = path.strip_suffix('/').unwrap().to_string();
+  //   }
+
+  //   let mut match_result = self.root.lookup(method.clone(), path.clone());
+  //   let redirect_behavior = self.redirect_method_behavior.get(&method).copied();
+  //   let redirect_behavior = redirect_behavior.or(self.redirect_behavior);
+  //   let redirect_behavior = redirect_behavior.filter(|v| *v != RedirectBehavior::UseHandler);
+
+  //   if match_result.is_none() {
+  //     if self.redirect_clean_path {
+  //       let clean_path: Cow<str> = crate::path::clean(&path).into();
+  //       match_result = self.root.lookup(method, clean_path.clone());
+  //       if match_result.is_none() {
+  //         return self.return_response(req, match_result).await;
+  //       }
+  //       if let Some(rdb) = redirect_behavior {
+  //         return self.redirect(req, rdb, clean_path).await;
+  //       }
+  //     } else {
+  //       return self.return_response(req, match_result).await;
+  //     }
+  //   }
+
+  //   let match_result = match_result.unwrap();
+  //   let mut handler = match_result.value.clone();
+  //   if handler.is_none() {
+  //     let rmeth = req.method();
+  //     if rmeth == Method::OPTIONS && self.handle_global_options.is_some() {
+  //       // req.extensions_mut().insert(match_result.parameters);
+  //       handler = self.handle_global_options.clone();
+  //       let h = handler.as_mut().unwrap();
+  //       return h.call(req).await;
+  //     }
+
+  //     if handler.is_none() {
+  //       let allowed = match_result.leaf_handler.keys().cloned().collect();
+  //       if let Some(handle_method_not_allowed) = self.handle_method_not_allowed.as_mut() {
+  //         return handle_method_not_allowed.call(req).await;
+  //       } else {
+  //         return default_method_not_allowed(allowed).await;
+  //       }
+  //     }
+  //   }
+
+  //   if (!match_result.is_catch_all || self.remove_catch_all_trailing_slash)
+  //     && has_trailing_slash != match_result.add_slash
+  //     && self.redirect_trailing_slash
+  //   {
+  //     let pth = if match_result.add_slash {
+  //       format!("{}/", path)
+  //     } else {
+  //       path
+  //     };
+
+  //     if handler.is_some() {
+  //       if let Some(rdb) = redirect_behavior {
+  //         return self.redirect(req, rdb, pth.into()).await;
+  //       }
+  //     }
+  //   }
+
+  //   self.return_response(req, Some(match_result)).await
+  // }
+
+  fn redirect(&mut self, req: Request<Body>, rdb: RedirectBehavior, new_path: Cow<'_, str>) -> ResponseFut {
+    let new_uri = if let Some(qs) = req.uri().query() {
+      format!("{}?{}", new_path, qs)
+    } else {
+      new_path.to_string()
+    };
+    let sc = match rdb {
+      RedirectBehavior::Redirect307 => StatusCode::TEMPORARY_REDIRECT,
+      RedirectBehavior::Redirect308 => StatusCode::PERMANENT_REDIRECT,
+      _ => StatusCode::MOVED_PERMANENTLY,
+    };
+    Box::pin(async move {
+      Ok(
+        Response::builder()
+          .status(sc)
+          .header(LOCATION, new_uri)
+          .header(
+            CONTENT_TYPE,
+            req
+              .headers()
+              .get(CONTENT_TYPE)
+              .cloned()
+              .unwrap_or_else(|| HeaderValue::from_static("text/html; charset=utf-8")),
+          )
+          .body(Body::empty())
+          .unwrap(),
+      )
+    })
+  }
+
+  async fn return_response(
+    &mut self,
+    mut req: Request<Body>,
+    match_result: Option<LookupResult<RequestHandler>>,
+  ) -> ResponseResult {
+    if let Some(mtc) = match_result.clone() {
+      req.extensions_mut().insert(mtc.parameters.clone());
+      let fut = mtc.value.unwrap().call(req);
+
+      if let Some(handle_panic) = self.handle_panic.clone() {
+        let fut = AssertUnwindSafe(fut).catch_unwind();
+        match fut.await {
+          Ok(response) => return response,
+          Err(panic) => {
+            return handle_panic(panic).await;
+          }
+        }
+      } else {
+        return handle_panics(fut).await;
+      }
+    }
+
+    if let Some(mut handle_not_found) = self.handle_not_found.clone() {
+      handle_not_found.call(req).await
+    } else {
+      default_not_found().await
+    }
+  }
+}
+
+async fn default_not_found() -> ResponseResult {
+  Response::builder()
+    .status(StatusCode::NOT_FOUND)
+    .body(Body::from(format!("{}", StatusCode::NOT_FOUND)))
+    .map_err(Into::into)
+}
+
+async fn default_method_not_allowed(allow: Vec<Method>) -> ResponseResult {
+  Response::builder()
+    .status(StatusCode::METHOD_NOT_ALLOWED)
+    .header(
+      ALLOW,
+      allow
+        .iter()
+        .map(|v| v.as_str().to_string())
+        .collect::<Vec<String>>()
+        .join(", "),
+    )
+    .body(Body::from(format!("{}", StatusCode::METHOD_NOT_ALLOWED)))
+    .map_err(Into::into)
+}
+
+async fn handle_panics(fut: impl Future<Output = ResponseResult>) -> ResponseResult {
+  let wrapped = AssertUnwindSafe(fut).catch_unwind();
+  match wrapped.await {
+    Ok(response) => response,
+    Err(panic) => {
+      let error = Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from(format!("{:?}", panic)))
+        .unwrap();
+      Ok(error)
+    }
+  }
+}
+
+impl<M> From<Builder<M>> for Treemux {
+  fn from(b: Builder<M>) -> Self {
+    b.build()
+  }
+}
+
+/// An asynchronous function from a `Request` to a `Response`. You will generally not need to use
+/// this function directly, and instead use
+/// [`Treemux::into_service`](crate::Treemux::into_service). However, it may be useful when
+/// incorporating the router into a larger service.
+/// ```rust,no_run
+/// # use treemux::{Treemux, RouterBuilder};
+/// # use hyper::service::{make_service_fn, service_fn};
+/// # use hyper::{Request, Body, Server};
+/// # use std::convert::Infallible;
+/// # use std::sync::Arc;
+///
+/// # async fn run() {
+/// let mut router = Treemux::builder();
+///
+/// let router: Arc<Treemux> = Arc::new(router.into());
+///
+/// let make_svc = make_service_fn(move |_| {
+///     let router = router.clone();
+///     async move {
+///         Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+///             let router = router.clone();
+///             async move { router.serve(req).await }
+///         }))
+///     }
+/// });
+///
+/// let server = Server::bind(&([127, 0, 0, 1], 3000).into())
+///     .serve(make_svc)
+///     .await;
+/// # }
+/// ```
+impl Service<Request<Body>> for Treemux {
+  type Response = Response<Body>;
+
+  type Error = http::Error;
+
+  type Future = Pin<Box<dyn Future<Output = ResponseResult> + Send>>;
+
+  fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    std::task::Poll::Ready(Ok(()))
+  }
+
+  fn call(&mut self, mut req: Request<Body>) -> Self::Future {
     let method = req.method().clone();
     let mut path = req.uri().path().to_string();
 
@@ -733,7 +984,7 @@ impl Treemux {
       path = path.strip_suffix('/').unwrap().to_string();
     }
 
-    let mut match_result = self.root.search(&method, path.clone());
+    let mut match_result = self.root.lookup(method.clone(), path.clone());
     let redirect_behavior = self.redirect_method_behavior.get(&method).copied();
     let redirect_behavior = redirect_behavior.or(self.redirect_behavior);
     let redirect_behavior = redirect_behavior.filter(|v| *v != RedirectBehavior::UseHandler);
@@ -741,35 +992,78 @@ impl Treemux {
     if match_result.is_none() {
       if self.redirect_clean_path {
         let clean_path: Cow<str> = crate::path::clean(&path).into();
-        match_result = self.root.search(&method, clean_path.clone());
+        match_result = self.root.lookup(method, clean_path.clone());
         if match_result.is_none() {
-          return self.return_response(req, match_result).await;
+          if let Some(mtc) = match_result {
+            req.extensions_mut().insert(mtc.parameters.clone());
+            let fut = mtc.value.unwrap().call(req);
+
+            if let Some(handle_panic) = self.handle_panic.clone() {
+              let fut = AssertUnwindSafe(fut).catch_unwind();
+              return Box::pin(async move {
+                match fut.await {
+                  Ok(response) => response,
+                  Err(panic) => handle_panic(panic).await,
+                }
+              });
+            } else {
+              return Box::pin(handle_panics(fut));
+            }
+          }
+
+          if let Some(mut handle_not_found) = self.handle_not_found.clone() {
+            return handle_not_found.call(req);
+          } else {
+            return Box::pin(default_not_found());
+          }
         }
         if let Some(rdb) = redirect_behavior {
-          return self.redirect(req, rdb, clean_path).await;
+          return self.redirect(req, rdb, clean_path);
         }
       } else {
-        return self.return_response(req, match_result).await;
+        if let Some(mtc) = match_result {
+          req.extensions_mut().insert(mtc.parameters.clone());
+          let fut = mtc.value.unwrap().call(req);
+
+          if let Some(handle_panic) = self.handle_panic.clone() {
+            let fut = AssertUnwindSafe(fut).catch_unwind();
+            return Box::pin(async move {
+              match fut.await {
+                Ok(response) => response,
+                Err(panic) => handle_panic(panic).await,
+              }
+            });
+          } else {
+            return Box::pin(handle_panics(fut));
+          }
+        }
+
+        if let Some(mut handle_not_found) = self.handle_not_found.clone() {
+          return handle_not_found.call(req);
+        } else {
+          return Box::pin(default_not_found());
+        }
       }
     }
 
     let match_result = match_result.unwrap();
-    let mut handler = match_result.value.map(|v| v.handler.clone());
+    let mut handler = match_result.value.clone();
     if handler.is_none() {
       let rmeth = req.method();
       if rmeth == Method::OPTIONS && self.handle_global_options.is_some() {
         // req.extensions_mut().insert(match_result.parameters);
         handler = self.handle_global_options.clone();
-        let h = handler.unwrap();
-        return (h.clone().as_ref())(req).await;
+        let h = handler.as_mut().unwrap();
+        return h.call(req);
       }
 
       if handler.is_none() {
         let allowed = match_result.leaf_handler.keys().cloned().collect();
-        if let Some(handle_method_not_allowed) = self.handle_method_not_allowed.as_ref() {
-          return handle_method_not_allowed(req, allowed).await;
+        if let Some(handle_method_not_allowed) = self.handle_method_not_allowed.as_mut() {
+          req.extensions_mut().insert(AllowedMethod(allowed));
+          return handle_method_not_allowed.call(req);
         } else {
-          return default_method_not_allowed(allowed).await;
+          return Box::pin(default_method_not_allowed(allowed));
         }
       }
     }
@@ -786,207 +1080,51 @@ impl Treemux {
 
       if handler.is_some() {
         if let Some(rdb) = redirect_behavior {
-          return self.redirect(req, rdb, pth.into()).await;
+          return self.redirect(req, rdb, pth.into());
         }
       }
     }
 
-    self.return_response(req, Some(match_result)).await
-  }
+    req.extensions_mut().insert(match_result.parameters.clone());
+    let fut = match_result.value.unwrap().call(req);
 
-  async fn redirect(
-    &self,
-    req: Request<Body>,
-    rdb: RedirectBehavior,
-    new_path: Cow<'_, str>,
-  ) -> Result<Response<Body>, http::Error> {
-    let new_uri = if let Some(qs) = req.uri().query() {
-      format!("{}?{}", new_path, qs).into()
-    } else {
-      new_path
-    };
-    let sc = match rdb {
-      RedirectBehavior::Redirect307 => StatusCode::TEMPORARY_REDIRECT,
-      RedirectBehavior::Redirect308 => StatusCode::PERMANENT_REDIRECT,
-      _ => StatusCode::MOVED_PERMANENTLY,
-    };
-    Ok(
-      Response::builder()
-        .status(sc)
-        .header(LOCATION, new_uri.as_ref())
-        .header(
-          CONTENT_TYPE,
-          req
-            .headers()
-            .get(CONTENT_TYPE)
-            .cloned()
-            .unwrap_or_else(|| HeaderValue::from_static("text/html; charset=utf-8")),
-        )
-        .body(Body::empty())
-        .unwrap(),
-    )
-  }
-
-  async fn return_response(
-    &self,
-    mut req: Request<Body>,
-    match_result: Option<Match<'_, Route>>,
-  ) -> Result<Response<Body>, http::Error> {
-    if let Some(mtc) = match_result {
-      req.extensions_mut().insert(mtc.parameters);
-      let fut = (mtc.value.unwrap().handler)(req);
-
-      if let Some(handle_panic) = self.handle_panic.as_ref() {
-        let fut = AssertUnwindSafe(fut).catch_unwind();
+    if let Some(handle_panic) = self.handle_panic.clone() {
+      let fut = AssertUnwindSafe(fut).catch_unwind();
+      Box::pin(async move {
         match fut.await {
-          Ok(response) => return response,
-          Err(panic) => {
-            return handle_panic(panic).await;
-          }
+          Ok(response) => response,
+          Err(panic) => handle_panic(panic).await,
         }
-      } else {
-        return handle_panics(fut).await;
-      }
-    }
-
-    if let Some(handle_not_found) = self.handle_not_found.as_ref() {
-      Ok(handle_not_found(req).await.unwrap())
+      })
     } else {
-      default_not_found().await
+      Box::pin(handle_panics(fut))
     }
-  }
-}
-
-impl Default for Treemux {
-  fn default() -> Self {
-    Self {
-      root: Node::new(),
-      handle_not_found: None,
-      handle_method_not_allowed: None,
-      handle_global_options: None,
-      handle_panic: None,
-      head_can_use_get: true,
-      redirect_trailing_slash: true,
-      redirect_clean_path: true,
-      redirect_behavior: Some(RedirectBehavior::Redirect301),
-      redirect_method_behavior: HashMap::default(),
-      remove_catch_all_trailing_slash: false,
-      escape_added_routes: false,
-    }
-  }
-}
-
-impl From<Builder> for Treemux {
-  fn from(b: Builder) -> Self {
-    b.build()
-  }
-}
-
-pub trait RouterBuilder {
-  /// Insert a value into the router for a specific path indexed by a key.
-  /// ```rust
-  /// use treemux::{Treemux, RouterBuilder};
-  /// use hyper::{Response, Body, Method, Request};
-  ///
-  /// let mut router = Treemux::builder();
-  /// router.handle(Method::GET, "/teapot", |_: Request<Body>| {
-  ///     async { Ok(Response::new(Body::from("I am a teapot!"))) }
-  /// });
-  /// let router: Treemux = router.into();
-  /// ```
-  fn handle<P, H, R>(&self, method: Method, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static;
-
-  /// Register a handler for `GET` requests
-  fn get<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::GET, path, handler);
-  }
-
-  /// Register a handler for `HEAD` requests
-  fn head<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::HEAD, path, handler);
-  }
-
-  /// Register a handler for `OPTIONS` requests
-  fn options<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::OPTIONS, path, handler);
-  }
-
-  /// Register a handler for `POST` requests
-  fn post<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::POST, path, handler);
-  }
-
-  /// Register a handler for `PUT` requests
-  fn put<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::PUT, path, handler);
-  }
-
-  /// Register a handler for `PATCH` requests
-  fn patch<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::PATCH, path, handler);
-  }
-
-  /// Register a handler for `DELETE` requests
-  fn delete<P, H, R>(&mut self, path: P, handler: H)
-  where
-    P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    self.handle(Method::DELETE, path, handler);
   }
 }
 
 #[cfg(test)]
 mod tests {
-
   use core::panic;
-  use std::{borrow::Cow, collections::HashMap, sync::Arc, vec};
-
-  use futures::prelude::*;
+  use std::{
+    any::type_name,
+    borrow::Cow,
+    collections::HashMap,
+    sync::{
+      atomic::{AtomicU64, Ordering},
+      Arc, Mutex,
+    },
+  };
 
   use hyper::{body, header::HeaderValue, http, Body, Method, Request, Response, StatusCode};
+
   use percent_encoding::percent_encode;
+  use tower_service::Service;
 
-  use crate::{Handler, RedirectBehavior, Treemux};
+  use crate::{RedirectBehavior, RequestExt};
 
-  use super::{Builder, RequestExt, RouterBuilder};
+  use super::{middleware_fn, AllowedMethod, Builder, ResponseResult, RouterBuilder, Treemux};
 
-  async fn empty_ok_response(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
+  async fn empty_ok_response(_req: Request<Body>) -> ResponseResult {
     Ok(Response::builder().status(StatusCode::OK).body(Body::empty()).unwrap())
   }
 
@@ -1003,14 +1141,14 @@ mod tests {
     }
     let mut b = Builder::default();
     b.scope("/foo").get("/", empty_ok_response);
-    let router = b.build();
+    let mut router = b.build();
 
     let req = Request::builder()
       .method(Method::GET)
       .uri("/foo")
       .body(Body::empty())
       .unwrap();
-    let response = router.serve(req).await.unwrap();
+    let response = router.call(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
 
     let req = Request::builder()
@@ -1018,7 +1156,7 @@ mod tests {
       .uri("/foo/")
       .body(Body::empty())
       .unwrap();
-    let response = router.serve(req).await.unwrap();
+    let response = router.call(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
   }
 
@@ -1029,14 +1167,14 @@ mod tests {
     }
     let mut b = Builder::default();
     b.scope("/foo").get("", empty_ok_response);
-    let router = b.build();
+    let mut router = b.build();
 
     let req = Request::builder()
       .method(Method::GET)
       .uri("/foo")
       .body(Body::empty())
       .unwrap();
-    let response = router.serve(req).await.unwrap();
+    let response = router.call(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
   }
 
@@ -1084,16 +1222,16 @@ mod tests {
     router.head("/abc", make_handler(Method::HEAD));
     router.get("/abc", make_handler(Method::GET));
 
-    let mux = Arc::new(router.build());
+    let mux = Arc::new(Mutex::new(router.build()));
     let test_method = |method: Method, expect: Method| {
-      let router = mux.clone();
+      let router = mux.lock();
       async move {
         let req = Request::builder()
           .uri("/abc")
           .method(method.clone())
           .body(Body::empty())
           .unwrap();
-        let result = router.serve(req).await;
+        let result = router.unwrap().call(req).await;
         let resp = result.unwrap();
         let result_method = resp
           .headers()
@@ -1120,10 +1258,10 @@ mod tests {
     let mut router = Treemux::builder();
     router.get("/user/abc", empty_ok_response);
 
-    let mux = router.build();
+    let mut mux = router.build();
 
     let response = mux
-      .serve(Request::builder().uri("/abc/").body(Body::empty()).unwrap())
+      .call(Request::builder().uri("/abc/").body(Body::empty()).unwrap())
       .await
       .unwrap();
 
@@ -1139,9 +1277,9 @@ mod tests {
           .unwrap(),
       )
     });
-    let mux = router.build();
+    let mut mux = router.build();
     let response = mux
-      .serve(Request::builder().uri("/abc/").body(Body::empty()).unwrap())
+      .call(Request::builder().uri("/abc/").body(Body::empty()).unwrap())
       .await
       .unwrap();
     assert_eq!(StatusCode::NOT_FOUND, response.status());
@@ -1157,10 +1295,10 @@ mod tests {
     router.get("/user/abc", empty_ok_response);
     router.put("/user/abc", empty_ok_response);
     router.delete("/user/abc", empty_ok_response);
-    let mux = router.build();
+    let mut mux = router.build();
 
     let response = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::POST)
           .uri("/user/abc")
@@ -1188,21 +1326,28 @@ mod tests {
     router.get("/user/abc", empty_ok_response);
     router.put("/user/abc", empty_ok_response);
     router.delete("/user/abc", empty_ok_response);
-    router.method_not_allowed(move |_request, allowed| async move {
+    router.method_not_allowed(|request: Request<Body>| {
+      let allowed = request
+        .extensions()
+        .get::<AllowedMethod>()
+        .map(|v| v.0.clone())
+        .unwrap_or_default();
       let mut allowed = allowed.iter().map(|v| v.as_str().to_string()).collect::<Vec<String>>();
       allowed.sort();
-      Ok(
-        Response::builder()
-          .status(StatusCode::METHOD_NOT_ALLOWED)
-          .header(http::header::ALLOW, allowed.join(", "))
-          .body(Body::from("custom method not allowed"))
-          .unwrap(),
-      )
+      async move {
+        Ok(
+          Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(http::header::ALLOW, allowed.join(", "))
+            .body(Body::from("custom method not allowed"))
+            .unwrap(),
+        )
+      }
     });
-    let mux = router.build();
+    let mut mux = router.build();
 
     let response = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::POST)
           .uri("/user/abc")
@@ -1250,9 +1395,9 @@ mod tests {
       router
     };
 
-    let mux = make_router().build();
+    let mut mux = make_router().build();
     let res = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::OPTIONS)
           .uri("/user/abc")
@@ -1273,9 +1418,9 @@ mod tests {
           .unwrap(),
       )
     });
-    let mux = builder.build();
+    let mut mux = builder.build();
     let res = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::OPTIONS)
           .uri("/user/abc")
@@ -1296,7 +1441,7 @@ mod tests {
     );
 
     let res = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::OPTIONS)
           .uri("/user/abc/options")
@@ -1317,9 +1462,9 @@ mod tests {
     );
 
     let builder = make_router();
-    let mux = builder.build();
+    let mut mux = builder.build();
     let res = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::OPTIONS)
           .uri("/user/abc/options")
@@ -1349,9 +1494,9 @@ mod tests {
           .unwrap(),
       )
     });
-    let mux = builder.build();
+    let mut mux = builder.build();
     let res = mux
-      .serve(
+      .call(
         Request::builder()
           .method(Method::POST)
           .uri("/user/abc")
@@ -1381,9 +1526,9 @@ mod tests {
     router.get("/abc", |_req| async {
       panic!("expected");
     });
-    let mux = router.build();
+    let mut mux = router.build();
     let res = mux
-      .serve(Request::builder().uri("/abc").body(Body::empty()).unwrap())
+      .call(Request::builder().uri("/abc").body(Body::empty()).unwrap())
       .await
       .unwrap();
     assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, res.status());
@@ -1400,15 +1545,14 @@ mod tests {
         .unwrap();
       Ok(error)
     });
-    let mux = router.build();
+    let mut mux = router.build();
     let res = mux
-      .serve(Request::builder().uri("/abc").body(Body::empty()).unwrap())
+      .call(Request::builder().uri("/abc").body(Body::empty()).unwrap())
       .await
       .unwrap();
     assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, res.status());
     assert_eq!("done", res.headers().get("X-Result").unwrap().to_str().unwrap());
   }
-
   #[tokio::test]
   async fn redirects() {
     if std::env::var("TEST_LOG").is_ok() {
@@ -1482,7 +1626,7 @@ mod tests {
     router.post("/noslash", redirect_handler);
     router.put("/slash/", redirect_handler);
     router.put("/noslash", redirect_handler);
-    let mux = router.build();
+    let mut mux = router.build();
 
     for (method, expected_code) in &expected_code_map {
       info!("Testing method {}, expecting code {}", method, expected_code);
@@ -1492,7 +1636,7 @@ mod tests {
         .uri("/slash")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(expected_code, &res.status());
       assert!(
         (expected_code != &StatusCode::NO_CONTENT
@@ -1505,7 +1649,7 @@ mod tests {
         .uri("/noslash/")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(expected_code, &res.status());
       assert!(
         (expected_code != &StatusCode::NO_CONTENT
@@ -1518,7 +1662,7 @@ mod tests {
         .uri("/noslash")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(StatusCode::NO_CONTENT, res.status());
 
       let req = Request::builder()
@@ -1526,7 +1670,7 @@ mod tests {
         .uri("/noslash?a=1&b=2")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(StatusCode::NO_CONTENT, res.status());
 
       let req = Request::builder()
@@ -1534,7 +1678,7 @@ mod tests {
         .uri("/slash/")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(StatusCode::NO_CONTENT, res.status());
 
       let req = Request::builder()
@@ -1542,7 +1686,7 @@ mod tests {
         .uri("/slash/?a=1&b=2")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(StatusCode::NO_CONTENT, res.status());
 
       let req = Request::builder()
@@ -1550,7 +1694,7 @@ mod tests {
         .uri("/slash?a=1&b=2")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(expected_code, &res.status());
       assert!(
         (expected_code != &StatusCode::NO_CONTENT
@@ -1569,7 +1713,7 @@ mod tests {
         .uri("/noslash/?a=1&b=2")
         .body(Body::empty())
         .unwrap();
-      let res = mux.serve(req).await.unwrap();
+      let res = mux.call(req).await.unwrap();
       assert_eq!(expected_code, &res.status());
       assert!(
         (expected_code != &StatusCode::NO_CONTENT
@@ -1593,13 +1737,13 @@ mod tests {
     router.get("/slash/", empty_ok_response);
     router.get("/noslash", empty_ok_response);
 
-    let mux = router.build();
+    let mut mux = router.build();
     let req = Request::builder().uri("/slash").body(Body::empty()).unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::NOT_FOUND, resp.status());
 
     let req = Request::builder().uri("/noslash/").body(Body::empty()).unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::NOT_FOUND, resp.status());
   }
 
@@ -1607,16 +1751,18 @@ mod tests {
   async fn catch_all_trailing_slash() {
     let redirect_settings = vec![false, true];
 
-    let test_path = |mux: Arc<Treemux>, pth: Cow<'static, str>| async move {
+    let test_path = |mux: Arc<Mutex<Treemux>>, pth: Cow<'static, str>| async move {
       let req = Request::builder()
         .method(Method::GET)
         .uri(format!("/abc/{}", pth))
         .body(Body::empty())
         .unwrap();
 
-      let resp = mux.serve(req).await.unwrap();
+      let mut tm = mux.lock().unwrap();
+      let resp = tm.call(req).await.unwrap();
       let trailing_slash = pth.ends_with('/');
-      let expected_code = if trailing_slash && mux.redirect_trailing_slash && mux.remove_catch_all_trailing_slash {
+
+      let expected_code = if trailing_slash && tm.redirect_trailing_slash && tm.remove_catch_all_trailing_slash {
         StatusCode::MOVED_PERMANENTLY
       } else {
         StatusCode::OK
@@ -1631,7 +1777,7 @@ mod tests {
         router.redirect_trailing_slash = *redirect_trailing_slash;
         router.get("/abc/*path", empty_ok_response);
 
-        let mux = Arc::new(router.build());
+        let mux = Arc::new(Mutex::new(router.build()));
         test_path(mux.clone(), "apples".into()).await;
         test_path(mux.clone(), "apples/".into()).await;
         test_path(mux.clone(), "apples/bananas".into()).await;
@@ -1651,13 +1797,13 @@ mod tests {
           .unwrap(),
       )
     });
-    let mux = router.build();
+    let mut mux = router.build();
     let req = Request::builder()
       .method(Method::GET)
       .uri("/")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::NO_CONTENT, resp.status());
   }
 
@@ -1668,14 +1814,14 @@ mod tests {
     router.get("/passing", slug_handler);
     router.get("/:slug", slug_handler);
     router.get("/:slug/abc", slug_handler);
-    let mux = router.build();
+    let mut mux = router.build();
 
     let req = Request::builder()
       .method(Method::GET)
       .uri("/patch")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1687,7 +1833,7 @@ mod tests {
       .uri("/patch/abc")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1699,7 +1845,7 @@ mod tests {
       .uri("/patch/def")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::NOT_FOUND, resp.status());
   }
 
@@ -1713,14 +1859,14 @@ mod tests {
     let mut router = Treemux::builder();
     router.get("/abc/:param", param_handler);
     router.get("/year/:year/month/:month", ym_handler);
-    let mux = router.build();
+    let mut mux = router.build();
 
     let req = Request::builder()
       .method(Method::GET)
       .uri("/abc/de%2ff")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1732,7 +1878,7 @@ mod tests {
       .uri("/year/de%2f/month/fg%2f")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1747,14 +1893,14 @@ mod tests {
     router.get("/wildcard/:param", param_handler);
     router.get("/catchall/*param", param_handler);
 
-    let mux = router.build();
+    let mut mux = router.build();
 
     let req = Request::builder()
       .method(Method::GET)
       .uri("/static?abc=def&ghi=jkl")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1766,7 +1912,7 @@ mod tests {
       .uri("/wildcard/aaa?abc=def")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1778,7 +1924,7 @@ mod tests {
       .uri("/catchall/bbb?abc=def")
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::OK, resp.status());
     let param = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
       .unwrap()
@@ -1835,7 +1981,7 @@ mod tests {
   async fn redirect_escaped_path() {
     let mut router = Treemux::builder();
     router.get("/:escaped/", empty_ok_response);
-    let mux = router.build();
+    let mut mux = router.build();
 
     let req = Request::builder()
       .method(Method::GET)
@@ -1845,7 +1991,7 @@ mod tests {
       ))
       .body(Body::empty())
       .unwrap();
-    let resp = mux.serve(req).await.unwrap();
+    let resp = mux.call(req).await.unwrap();
     assert_eq!(StatusCode::MOVED_PERMANENTLY, resp.status());
     let location = resp
       .headers()
@@ -1886,7 +2032,7 @@ mod tests {
         });
       }
 
-      let mux = router.build();
+      let mut mux = router.build();
       for (_, path, param, param_value) in &test_cases {
         let uri = hyper::Uri::builder().path_and_query(*path).build().unwrap();
         let escaped_path = uri.path().to_string();
@@ -1897,7 +2043,7 @@ mod tests {
           .uri(uri)
           .body(Body::empty())
           .unwrap();
-        let resp = mux.serve(req).await.unwrap();
+        let resp = mux.call(req).await.unwrap();
         let pv = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
           .unwrap()
           .to_string();
@@ -1913,7 +2059,7 @@ mod tests {
             .uri(escaped_path)
             .body(Body::empty())
             .unwrap();
-          let resp = mux.serve(req).await.unwrap();
+          let resp = mux.call(req).await.unwrap();
           let status = resp.status();
           let pv = std::str::from_utf8(&body::to_bytes(resp.into_body()).await.unwrap())
             .unwrap_or_default()
@@ -1931,98 +2077,108 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn builder() {
+  async fn test_middlewares() {
     if std::env::var("TEST_LOG").is_ok() {
       femme::try_with_level(femme::LevelFilter::Trace).ok();
     }
-    let mut b = Builder::default();
-    b.middleware(log_request);
-    b.get("/hello", hello_world);
-    b.get("/other", hello_again_world);
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut mux = Treemux::builder();
 
-    let mut grp = Builder::default();
-    grp.get("/hello", hello_world);
-    grp.post("/hello", hello_world);
-    grp.get("/other", hello_again_world);
-    b.extend("/api/:user/:thing", grp);
-
-    let mut scp = b.scope("/apps/:appid/user");
-    scp.middleware(debug_log_request);
-    scp.get("/hello", nested_world);
-    scp.post("/hello", nested_world);
-
-    let tm: Treemux = b.into();
-
-    let resp = tm
-      .serve(Request::builder().uri("/hello").body(Body::empty()).unwrap())
-      .await
-      .unwrap();
-    info!("/hello: {:?}", resp);
-    let resp = tm
-      .serve(Request::builder().uri("/other").body(Body::empty()).unwrap())
-      .await
-      .unwrap();
-    info!("/other: {:?}", resp);
-
-    let resp = tm
-      .serve(
-        Request::builder()
-          .uri("/apps/kohana/user/hello")
+    mux.not_found(|_req| async {
+      Ok(
+        Response::builder()
+          .status(StatusCode::NOT_FOUND)
           .body(Body::empty())
           .unwrap(),
       )
+    });
+
+    let clc = counter.clone();
+    let mwfn = middleware_fn(move |next| {
+      let counter = clc.clone();
+      move |req| {
+        let fut = next(req);
+        let counter = counter.clone();
+        async move {
+          counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+          fut.await
+        }
+      }
+    });
+    info!("{:?}", type_name_of_val(&mwfn));
+    let mux = mux.middleware(mwfn);
+
+    let clc = counter.clone();
+    mux.add_route(Method::GET, "/second", move |_req| {
+      let counter = clc.clone();
+      async move {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(
+          Response::builder()
+            .status(StatusCode::OK)
+            .body("/second".into())
+            .unwrap(),
+        )
+      }
+    });
+    let mut mux = mux.build();
+
+    let resp = mux
+      .call(Request::get("/second").body(Body::empty()).unwrap())
       .await
       .unwrap();
-    info!("/apps/kohana/user/hello: {:?}", resp);
+    assert_eq!(StatusCode::OK, resp.status());
+    assert_eq!(body::to_bytes(resp.into_body()).await.unwrap().as_ref(), b"/second");
+    assert_eq!(2, counter.load(Ordering::SeqCst));
+
+    let resp = mux
+      .call(Request::get("/second").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::OK, resp.status());
+    assert_eq!(body::to_bytes(resp.into_body()).await.unwrap().as_ref(), b"/second");
+    assert_eq!(4, counter.load(Ordering::SeqCst));
   }
 
-  async fn hello_world(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
-    info!("inside the handler");
-    let resp = Response::builder().body(Body::from("Hello, World!"));
-    info!("created response, returning from handler");
-    resp
+  fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
+    type_name::<T>()
   }
+  #[tokio::test]
+  async fn test_not_found() {
+    let mut mux = Treemux::builder();
 
-  async fn hello_again_world(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
-    Response::builder().body(Body::from("Hello again, World!"))
-  }
+    mux.not_found(|_req| async {
+      Ok(
+        Response::builder()
+          .status(StatusCode::NOT_FOUND)
+          .body(Body::empty())
+          .unwrap(),
+      )
+    });
 
-  async fn nested_world(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
-    Response::builder().body(Body::from("Nested World!"))
-  }
+    mux.add_route(Method::GET, "/hello", |_req| async {
+      Ok(
+        Response::builder()
+          .status(StatusCode::OK)
+          .body("/hello".into())
+          .unwrap(),
+      )
+    });
+    let mut mux = mux.build();
+    // mux.middleware(layer_fn(move |svc| svc));
 
-  fn log_request<H, R>(f: H) -> Handler
-  where
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    Box::new(move |req: Request<Body>| {
-      info!("before calling f");
-      let fut = f(req);
-      Box::pin(async move {
-        info!("before await");
-        let resp = fut.await;
-        info!("after response");
-        resp
-      })
-    })
-  }
+    let resp = mux
+      .call(Request::get("/hello").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::OK, resp.status());
+    assert_eq!(body::to_bytes(resp.into_body()).await.unwrap().as_ref(), b"/hello");
 
-  fn debug_log_request<H, R>(f: H) -> Handler
-  where
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = Result<Response<Body>, http::Error>> + Send + 'static,
-  {
-    Box::new(move |req: Request<Body>| {
-      debug!("before calling f");
-      let fut = f(req);
-      Box::pin(async move {
-        debug!("before await");
-        let resp = fut.await;
-        debug!("after response");
-        resp
-      })
-    })
+    let resp = mux
+      .call(Request::get("/baba").body(Body::empty()).unwrap())
+      .await
+      .unwrap();
+    assert_eq!(StatusCode::NOT_FOUND, resp.status());
   }
 
   async fn group_methods(head_can_use_get: bool) {
@@ -2047,7 +2203,7 @@ mod tests {
       let mut router = Treemux::builder();
       router.head_can_use_get = head_can_use_get;
 
-      let mut b = router.scope("/base");
+      let b = router.scope("/base");
       let mut g = b.scope("/user");
       g.get("/:param", make_handler(Method::GET));
       g.post("/:param", make_handler(Method::POST));
@@ -2057,14 +2213,14 @@ mod tests {
       router
     };
 
-    let test_method = |router: Arc<Treemux>, method: Method, expect: Option<Method>| async move {
-      let router = router.clone();
+    let test_method = |router: Arc<Mutex<Treemux>>, method: Method, expect: Option<Method>| async move {
+      let mut router = router.lock();
       let req = Request::builder()
         .uri(format!("/base/user/{}", method.as_str()))
         .method(method.clone())
         .body(Body::empty())
         .unwrap();
-      let result = router.serve(req).await;
+      let result = router.unwrap().call(req).await;
       let resp = result.unwrap();
       match expect {
         Some(expect) => {
@@ -2090,7 +2246,7 @@ mod tests {
       }
     };
 
-    let router = Arc::new(make_router().build());
+    let router = Arc::new(Mutex::new(make_router().build()));
 
     test_method(router.clone(), Method::GET, Some(Method::GET)).await;
     test_method(router.clone(), Method::POST, Some(Method::POST)).await;
@@ -2107,6 +2263,6 @@ mod tests {
 
     let mut router = make_router();
     router.head("/base/user/:param", make_handler(Method::HEAD));
-    test_method(Arc::new(router.build()), Method::HEAD, Some(Method::HEAD)).await;
+    test_method(Arc::new(Mutex::new(router.build())), Method::HEAD, Some(Method::HEAD)).await;
   }
 }

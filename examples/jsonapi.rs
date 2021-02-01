@@ -7,7 +7,7 @@ use hyper::{
 };
 use hyper::{Body, Request, Server};
 use log::info;
-use treemux::{middlewares, Handler, RouterBuilder, Treemux};
+use treemux::{middleware_fn, middlewares, AllowedMethod, Handler, RouterBuilder, Treemux};
 
 async fn todos(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
   Response::builder()
@@ -28,7 +28,12 @@ async fn not_found(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
   )
 }
 
-async fn method_not_allowed(_req: Request<Body>, allowed: Vec<Method>) -> Result<Response<Body>, http::Error> {
+async fn method_not_allowed(req: Request<Body>) -> Result<Response<Body>, http::Error> {
+  let allowed = req
+    .extensions()
+    .get::<AllowedMethod>()
+    .map(|v| v.methods())
+    .unwrap_or_default();
   let allowed_methods = allowed
     .iter()
     .map(|v| v.as_str().to_string())
@@ -50,21 +55,21 @@ async fn method_not_allowed(_req: Request<Body>, allowed: Vec<Method>) -> Result
 #[tokio::main]
 async fn main() -> Result<()> {
   femme::with_level(LevelFilter::Debug);
-  let mut router = Treemux::builder();
+  let router = Treemux::builder();
 
-  router.middleware(|next: Handler| -> Handler {
+  let router = router.middleware(middleware_fn(move |next| {
     info!("middleware constructor");
-    Box::new(move |request| {
+    move |request| {
       info!("before handling request");
       let fut = next(request).map(|response| {
         info!("after processing the request");
         response
       });
 
-      Box::pin(fut)
-    })
-  });
-  router.middleware(middlewares::log_requests);
+      async move { fut.await }
+    }
+  }));
+  let mut router = router.middleware(middleware_fn(middlewares::log_requests));
 
   router.not_found(not_found);
   router.method_not_allowed(method_not_allowed);
