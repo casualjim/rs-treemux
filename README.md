@@ -31,7 +31,7 @@ Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/
 Here is a simple example:
 
 ```rust,no_run
-use treemux::{Treemux, RouterBuilder, Params, RequestExt};
+use treemux::{middleware_fn, Treemux, RouterBuilder, Params, RequestExt};
 use treemux::middlewares;
 use std::convert::Infallible;
 use hyper::{Request, Response, Body};
@@ -48,8 +48,8 @@ async fn hello(req: Request<Body>) -> Result<Response<Body>, Error> {
 
 #[tokio::main]
 async fn main() {
-  let mut router = Treemux::builder();
-  router.middleware(middlewares::log_requests);
+  let router = Treemux::builder();
+  let mut router = router.middleware(middleware_fn(middlewares::log_requests));
   router.get("/", index);
   router.get("/hello/:user", hello);
 

@@ -112,7 +112,7 @@
 //!
 //! ```rust,no_run
 //! use treemux::{Handler, Treemux, RouterBuilder};
-//! use hyper::service::{make_service_fn, service_fn};
+//! use hyper::service::{make_service_fn, service_fn, Service};
 //! use hyper::{Body, Request, Response, Server, StatusCode};
 //! use std::collections::HashMap;
 //! use std::convert::Infallible;

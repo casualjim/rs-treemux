@@ -3,11 +3,11 @@ use femme::LevelFilter;
 use futures::FutureExt;
 use hyper::{
   header::{ALLOW, CONTENT_TYPE},
-  http, Method, Response, StatusCode,
+  http, Response, StatusCode,
 };
 use hyper::{Body, Request, Server};
 use log::info;
-use treemux::{middleware_fn, middlewares, AllowedMethod, Handler, RouterBuilder, Treemux};
+use treemux::{middleware_fn, middlewares, AllowedMethods, RouterBuilder, Treemux};
 
 async fn todos(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
   Response::builder()
@@ -31,7 +31,7 @@ async fn not_found(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
 async fn method_not_allowed(req: Request<Body>) -> Result<Response<Body>, http::Error> {
   let allowed = req
     .extensions()
-    .get::<AllowedMethod>()
+    .get::<AllowedMethods>()
     .map(|v| v.methods())
     .unwrap_or_default();
   let allowed_methods = allowed
@@ -61,12 +61,10 @@ async fn main() -> Result<()> {
     info!("middleware constructor");
     move |request| {
       info!("before handling request");
-      let fut = next(request).map(|response| {
+      next(request).map(|response| {
         info!("after processing the request");
         response
-      });
-
-      async move { fut.await }
+      })
     }
   }));
   let mut router = router.middleware(middleware_fn(middlewares::log_requests));
