@@ -24,7 +24,7 @@ If you're familiar with the go world, this is the equivalent of [httptreemux](ht
 
 **High Performance:** Treemux relies on a tree structure which makes heavy use of *common prefixes*, it is basically a [radix tree](https://en.wikipedia.org/wiki/Radix_tree). This makes lookups extremely fast.
 
-Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.not_found) and  [`MethodNotAllowed`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.method_not_allowed) handlers** , [**serve static files**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#method.serve_files), and [**automatically respond to OPTIONS requests**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.global_options)
+Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/treemux/mux/struct.Builder.html#method.not_found) and  [`MethodNotAllowed`](https://docs.rs/treemux/newest/treemux/mux/struct.Builder.html#method.method_not_allowed) handlers** , [**serve static files**](https://docs.rs/treemux/newest/treemux/router/struct.Builder.html#method.serve_files), and [**automatically respond to OPTIONS requests**](https://docs.rs/treemux/newest/treemux/router/struct.Builder.html#method.global_options)
 
 ## Usage
 
@@ -199,8 +199,22 @@ fn main() {
 
 ### Static files
 
-You can use the router to serve pages from a static file directory:
+You can use the router to serve pages from a static file directory with the [static_files helper method](examples/staticfile.rs).
 
-```rust
-// TODO
+```rust,ignore
+use hyper::Server;
+use treemux::{static_files, RouterBuilder, Treemux};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+  let mut router = Treemux::builder();
+  router.get("/", static_files("./examples/static"));
+  router.get("/*", static_files("./examples/static"));
+
+  Server::bind(&([127, 0, 0, 1], 3000).into())
+    .serve(router.into_service())
+    .await?;
+  Ok(())
+}
 ```
+

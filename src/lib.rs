@@ -1,6 +1,6 @@
 //! # Treemux
 //!
-//! [![Documentation](https://img.shields.io/badge/docs-0.4.0-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.4.0)
+//! [![Documentation](https://img.shields.io/badge/docs-0.5.0-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.5.0)
 //! [![Version](https://img.shields.io/crates/v/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 //! [![License](https://img.shields.io/crates/l/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
 //! [![Actions](https://img.shields.io/github/workflow/status/casualjim/rs-treemux/Rust/master?style=for-the-badge)](https://github.com/casualjim/rs-treemux/actions)
@@ -21,7 +21,7 @@
 //!
 //! **High Performance:** Treemux relies on a tree structure which makes heavy use of *common prefixes*, it is basically a [radix tree](https://en.wikipedia.org/wiki/Radix_tree). This makes lookups extremely fast.
 //!
-//! Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.not_found) and  [`MethodNotAllowed`](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.method_not_allowed) handlers** , [**serve static files**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#method.serve_files), and [**automatically respond to OPTIONS requests**](https://docs.rs/treemux/newest/treemux/router/struct.Router.html#structfield.global_options)
+//! Of course you can also set **custom [`NotFound`](https://docs.rs/treemux/newest/treemux/mux/struct.Builder.html#method.not_found) and  [`MethodNotAllowed`](https://docs.rs/treemux/newest/treemux/mux/struct.Builder.html#method.method_not_allowed) handlers** , [**serve static files**](https://docs.rs/treemux/newest/treemux/router/struct.Builder.html#method.serve_files), and [**automatically respond to OPTIONS requests**](https://docs.rs/treemux/newest/treemux/router/struct.Builder.html#method.global_options)
 //!
 //! ## Usage
 //!
@@ -185,14 +185,6 @@
 //!         .body(Body::empty())
 //!         .unwrap())
 //! });
-//! ```
-//!
-//! ### Static files
-//!
-//! You can use the router to serve pages from a static file directory:
-//!
-//! ```rust
-//! // TODO
 //! ```
 
 #[macro_use]

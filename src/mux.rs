@@ -90,6 +90,9 @@
 //!  let third_value = &params[2].value; // the value of the 3rd parameter
 //! ```
 
+#[cfg(feature = "hyper-staticfile")]
+use std::path::PathBuf;
+
 use std::{any::Any, borrow::Cow, collections::HashMap, net::SocketAddr, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
 use futures::{Future, FutureExt};
@@ -150,71 +153,64 @@ pub trait RouterBuilder {
     H: Into<RequestHandler>;
 
   /// Register a handler for `GET` requests
-  fn get<P, H, R>(&mut self, path: P, handler: H)
+  fn get<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::GET, path, handler);
   }
 
   /// Register a handler for `HEAD` requests
-  fn head<P, H, R>(&mut self, path: P, handler: H)
+  fn head<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::HEAD, path, handler);
   }
 
   /// Register a handler for `OPTIONS` requests
-  fn options<P, H, R>(&mut self, path: P, handler: H)
+  fn options<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::OPTIONS, path, handler);
   }
 
   /// Register a handler for `POST` requests
-  fn post<P, H, R>(&mut self, path: P, handler: H)
+  fn post<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::POST, path, handler);
   }
 
   /// Register a handler for `PUT` requests
-  fn put<P, H, R>(&mut self, path: P, handler: H)
+  fn put<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::PUT, path, handler);
   }
 
   /// Register a handler for `PATCH` requests
-  fn patch<P, H, R>(&mut self, path: P, handler: H)
+  fn patch<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::PATCH, path, handler);
   }
 
   /// Register a handler for `DELETE` requests
-  fn delete<P, H, R>(&mut self, path: P, handler: H)
+  fn delete<P, H>(&mut self, path: P, handler: H)
   where
     P: Into<String>,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
-    R: Future<Output = ResponseResult> + Send + 'static,
+    H: Into<RequestHandler>,
   {
     self.handle(Method::DELETE, path, handler);
   }
@@ -226,6 +222,34 @@ pub type ResponseFut = Pin<Box<dyn Future<Output = ResponseResult> + Send + 'sta
 pub type Handler = Box<dyn Fn(Request<Body>) -> ResponseFut + Send + Sync>;
 type HandlerArc = Arc<Handler>;
 pub type PanicHandler = Arc<dyn Fn(Box<dyn Any + Send>) -> ResponseFut + Send + Sync + 'static>;
+
+/// Create a handler for serving static files
+///
+/// ```rust,ignore
+/// # use treemux::{Treemux, RouterBuilder};
+/// # use hyper::Server;
+///
+/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+///   let mut router = Treemux::builder();
+///   router.get("/", static_files("./examples/static"));
+///   router.get("/*", static_files("./examples/static"));
+///
+///   let _server = Server::bind(&([127, 0, 0, 1], 3000).into()).serve(router.into_service()).await?;
+/// # Ok(())
+/// #}
+#[cfg(feature = "hyper-staticfile")]
+pub fn static_files(root: impl Into<PathBuf>) -> impl Into<RequestHandler> {
+  let static_ = hyper_staticfile::Static::new(root);
+  move |req: Request<Body>| {
+    let static_ = static_.clone();
+    async move {
+      match static_.clone().serve(req).await {
+        Ok(resp) => Ok(resp),
+        Err(_) => Ok(Response::builder().body(Body::empty()).unwrap()),
+      }
+    }
+  }
+}
 
 #[derive(Clone)]
 pub struct AllowedMethods(Vec<Method>);
@@ -637,6 +661,7 @@ pub struct Treemux {
   escape_added_routes: bool,
 }
 
+/// middleware_fn creates middleware implementations from function pointers or closures
 pub fn middleware_fn<F, R, Q>(middleware: F) -> impl Layer<RequestHandler, Service = RequestHandler>
 where
   R: Fn(Request<Body>) -> Q,
@@ -965,144 +990,6 @@ impl<M> From<Builder<M>> for Treemux {
     b.build()
   }
 }
-
-// impl Service<Request<Body>> for Treemux {
-//   type Response = Response<Body>;
-
-//   type Error = http::Error;
-
-//   type Future = Pin<Box<dyn Future<Output = ResponseResult> + Send>>;
-
-//   fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-//     std::task::Poll::Ready(Ok(()))
-//   }
-
-//   fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-//     let method = req.method().clone();
-//     let mut path = req.uri().path().to_string();
-
-//     let has_trailing_slash = path.len() > 1 && path.ends_with('/');
-//     if has_trailing_slash && self.redirect_trailing_slash {
-//       path = path.strip_suffix('/').unwrap().to_string();
-//     }
-
-//     let mut match_result = self.root.lookup(method.clone(), path.clone());
-//     let redirect_behavior = self.redirect_method_behavior.get(&method).copied();
-//     let redirect_behavior = redirect_behavior.or(self.redirect_behavior);
-//     let redirect_behavior = redirect_behavior.filter(|v| *v != RedirectBehavior::UseHandler);
-
-//     if match_result.is_none() {
-//       if self.redirect_clean_path {
-//         let clean_path: Cow<str> = crate::path::clean(&path).into();
-//         match_result = self.root.lookup(method, clean_path.clone());
-//         if match_result.is_none() {
-//           if let Some(mtc) = match_result {
-//             req.extensions_mut().insert(mtc.parameters.clone());
-//             let fut = mtc.value.unwrap().call(req);
-
-//             if let Some(handle_panic) = self.handle_panic.clone() {
-//               let fut = AssertUnwindSafe(fut).catch_unwind();
-//               return Box::pin(async move {
-//                 match fut.await {
-//                   Ok(response) => response,
-//                   Err(panic) => handle_panic(panic).await,
-//                 }
-//               });
-//             } else {
-//               return Box::pin(handle_panics(fut));
-//             }
-//           }
-
-//           if let Some(mut handle_not_found) = self.handle_not_found.clone() {
-//             return handle_not_found.call(req);
-//           } else {
-//             return Box::pin(default_not_found());
-//           }
-//         }
-//         if let Some(rdb) = redirect_behavior {
-//           return self.redirect(req, rdb, clean_path);
-//         }
-//       } else {
-//         if let Some(mtc) = match_result {
-//           req.extensions_mut().insert(mtc.parameters.clone());
-//           let fut = mtc.value.unwrap().call(req);
-
-//           if let Some(handle_panic) = self.handle_panic.clone() {
-//             let fut = AssertUnwindSafe(fut).catch_unwind();
-//             return Box::pin(async move {
-//               match fut.await {
-//                 Ok(response) => response,
-//                 Err(panic) => handle_panic(panic).await,
-//               }
-//             });
-//           } else {
-//             return Box::pin(handle_panics(fut));
-//           }
-//         }
-
-//         if let Some(mut handle_not_found) = self.handle_not_found.clone() {
-//           return handle_not_found.call(req);
-//         } else {
-//           return Box::pin(default_not_found());
-//         }
-//       }
-//     }
-
-//     let match_result = match_result.unwrap();
-//     let mut handler = match_result.value.clone();
-//     if handler.is_none() {
-//       let rmeth = req.method();
-//       if rmeth == Method::OPTIONS && self.handle_global_options.is_some() {
-//         // req.extensions_mut().insert(match_result.parameters);
-//         handler = self.handle_global_options.clone();
-//         let h = handler.as_mut().unwrap();
-//         return h.call(req);
-//       }
-
-//       if handler.is_none() {
-//         let allowed = match_result.leaf_handler.keys().cloned().collect();
-//         if let Some(handle_method_not_allowed) = self.handle_method_not_allowed.as_mut() {
-//           req.extensions_mut().insert(AllowedMethod(allowed));
-//           return handle_method_not_allowed.call(req);
-//         } else {
-//           return Box::pin(default_method_not_allowed(allowed));
-//         }
-//       }
-//     }
-
-//     if (!match_result.is_catch_all || self.remove_catch_all_trailing_slash)
-//       && has_trailing_slash != match_result.add_slash
-//       && self.redirect_trailing_slash
-//     {
-//       let pth = if match_result.add_slash {
-//         format!("{}/", path)
-//       } else {
-//         path
-//       };
-
-//       if handler.is_some() {
-//         if let Some(rdb) = redirect_behavior {
-//           return self.redirect(req, rdb, pth.into());
-//         }
-//       }
-//     }
-
-//     req.extensions_mut().insert(match_result.parameters.clone());
-//     let fut = match_result.value.unwrap().call(req);
-
-//     if let Some(handle_panic) = self.handle_panic.clone() {
-//       let fut = AssertUnwindSafe(fut).catch_unwind();
-//       Box::pin(async move {
-//         match fut.await {
-//           Ok(response) => response,
-//           Err(panic) => handle_panic(panic).await,
-//         }
-//       })
-//     } else {
-//       Box::pin(handle_panics(fut))
-//     }
-//   }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -2023,7 +1910,7 @@ mod tests {
       router.escape_added_routes = escape;
 
       for (route, _, _, _) in &test_cases {
-        router.get(*route, |req| async move {
+        router.get(*route, |req: Request<Body>| async move {
           let param = req.params().first();
           if let Some(param) = param {
             let v = format!("{}={}", param.key, param.value);
