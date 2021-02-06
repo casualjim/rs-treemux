@@ -26,6 +26,6 @@ async fn main() -> anyhow::Result<()> {
     }
   });
 
-  let _server = Server::bind(&([127, 0, 0, 1], 3000).into()).serve(make_svc).await;
+  let _server = Server::bind(&([127, 0, 0, 1], 3000).into()).serve(make_svc).await?;
   Ok(())
 }

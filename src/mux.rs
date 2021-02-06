@@ -93,7 +93,10 @@
 #[cfg(feature = "hyper-staticfile")]
 use std::path::PathBuf;
 
-use std::{any::Any, borrow::Cow, collections::HashMap, net::SocketAddr, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
+use std::{
+  any::Any, borrow::Cow, collections::HashMap, net::SocketAddr, panic::AssertUnwindSafe, pin::Pin, str::FromStr,
+  sync::Arc,
+};
 
 use futures::{Future, FutureExt};
 
@@ -111,9 +114,18 @@ use crate::{
   Params, RedirectBehavior,
 };
 
+/// Extensions to the request object for accessing the route parameters,
+/// remote address
 pub trait RequestExt {
+  /// The route parameters if any.
   fn params(&self) -> &Params;
+
+  /// The matched route pattern
+  fn route(&self) -> &str;
+
+  /// The remote address for the request, also respects `X-Forwarded-For`
   fn remote_addr(&self) -> SocketAddr;
+  /// Contains the application context when created with `into_service_with_context`
   fn app_context<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
 }
 
@@ -124,14 +136,24 @@ impl RequestExt for Request<Body> {
 
   fn remote_addr(&self) -> SocketAddr {
     self
-      .extensions()
-      .get::<SocketAddr>()
-      .copied()
-      .expect("No remote address present on the request")
+      .headers()
+      .get("X-Forwarded-For")
+      .map(|p| SocketAddr::from_str(p.to_str().unwrap()).unwrap())
+      .unwrap_or_else(|| {
+        self
+          .extensions()
+          .get::<SocketAddr>()
+          .copied()
+          .expect("No remote address present on the request")
+      })
   }
 
   fn app_context<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
     self.extensions().get::<Arc<T>>().cloned()
+  }
+
+  fn route(&self) -> &str {
+    &self.extensions().get::<LookupResult<RequestHandler>>().unwrap().pattern
   }
 }
 
@@ -222,6 +244,8 @@ pub type ResponseFut = Pin<Box<dyn Future<Output = ResponseResult> + Send + 'sta
 pub type Handler = Box<dyn Fn(Request<Body>) -> ResponseFut + Send + Sync>;
 type HandlerArc = Arc<Handler>;
 pub type PanicHandler = Arc<dyn Fn(Box<dyn Any + Send>) -> ResponseFut + Send + Sync + 'static>;
+pub type ServiceBox =
+  Box<dyn Service<Request<Body>, Response = Response<Body>, Error = http::Error, Future = ResponseFut>>;
 
 /// Create a handler for serving static files
 ///
@@ -383,8 +407,8 @@ pub struct Builder<M> {
   /// if no handler is registered for it.This is true by default.
   pub redirect_clean_path: bool,
 
-  /// Overrides the default behavior for a particular HTTP method.
-  /// The key is the method name, and the value is the behavior to use for that method.
+  /// RedirectBehavior sets the default redirect behavior when RedirectTrailingSlash or
+  /// RedirectCleanPath are true. The default value is Redirect301.
   pub redirect_behavior: Option<RedirectBehavior>,
 
   /// Overrides the default behavior for a particular HTTP method.
@@ -848,6 +872,8 @@ impl Treemux {
     }
 
     let match_result = match_result.unwrap();
+    req.extensions_mut().insert(match_result.clone());
+
     let mut handler = match_result.value.clone();
     if handler.is_none() {
       let rmeth = req.method();

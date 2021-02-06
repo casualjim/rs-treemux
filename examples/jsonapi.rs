@@ -32,21 +32,23 @@ async fn method_not_allowed(req: Request<Body>) -> Result<Response<Body>, http::
   let allowed = req
     .extensions()
     .get::<AllowedMethods>()
-    .map(|v| v.methods())
+    .map(|v| {
+      v.methods()
+        .iter()
+        .map(|v| v.as_str().to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
+    })
     .unwrap_or_default();
-  let allowed_methods = allowed
-    .iter()
-    .map(|v| v.as_str().to_string())
-    .collect::<Vec<String>>()
-    .join(", ");
+
   Ok(
     Response::builder()
       .status(StatusCode::METHOD_NOT_ALLOWED)
       .header(CONTENT_TYPE, "application/json; charset=utf-8")
-      .header(ALLOW, &allowed_methods)
+      .header(ALLOW, &allowed)
       .body(Body::from(format!(
         r#"{{"message":"Method not allowed, try {}"}}"#,
-        allowed_methods
+        allowed
       )))
       .unwrap(),
   )
@@ -85,7 +87,6 @@ async fn main() -> Result<()> {
 
   Server::bind(&([127, 0, 0, 1], 3000).into())
     .serve(router.into_service())
-    .await
-    .unwrap();
+    .await?;
   Ok(())
 }

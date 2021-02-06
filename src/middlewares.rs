@@ -15,13 +15,8 @@ where
     let start = SystemTime::now();
     let method = req.method().as_str().to_string();
     let path = req.uri().path_and_query().unwrap().as_str().to_string();
-    // debug!("Received request", {
-    //   method: req.method().as_str(),
-    //   path: req.uri().path_and_query().unwrap().as_str(),
-    //   headers: log::kv::value::Value::from_debug(req.headers()),
-    //   body: log::kv::value::Value::from_debug(req.body()),
-    // });
 
+    trace!("begin processing request");
     let fut = next(req);
     Box::pin(async move {
       let result = fut.await;
