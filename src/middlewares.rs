@@ -2,6 +2,7 @@ use std::time::SystemTime;
 
 use futures::Future;
 use hyper::{header::HeaderValue, http, Body, Request, Response};
+use tracing::{error, info, trace, warn};
 
 use crate::Handler;
 
@@ -25,25 +26,23 @@ where
         Ok(mut resp) => {
           if resp.status().is_success() {
             info!(
-              "Processed request", {
-                method: method,
-                path: path,
-                took: log::kv::value::Value::from_debug(&took),
-                status_code: resp.status().as_u16(),
-                headers: log::kv::value::Value::from_debug(resp.headers()),
-                body: log::kv::value::Value::from_debug(resp.body()),
-              }
+              message = "Processed request",
+              method = method.as_str(),
+              path = path.as_str(),
+              took = format!("{:?}", took).as_str(),
+              status_code = resp.status().as_u16(),
+              headers = format!("{:?}", resp.headers()).as_str(),
+              body = format!("{:?}", resp.body()).as_str(),
             );
           } else {
             warn!(
-              "Processed request", {
-                method: method,
-                path: path,
-                took: log::kv::value::Value::from_debug(&took),
-                status_code: resp.status().as_u16(),
-                headers: log::kv::value::Value::from_debug(resp.headers()),
-                body: log::kv::value::Value::from_debug(resp.body()),
-              }
+              message = "Processed request",
+              method = method.as_str(),
+              path = path.as_str(),
+              took = format!("{:?}", took).as_str(),
+              status_code = resp.status().as_u16(),
+              headers = format!("{:?}", resp.headers()).as_str(),
+              body = format!("{:?}", resp.body()).as_str(),
             );
           }
           let tstr = format!("{:?}", took);

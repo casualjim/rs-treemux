@@ -1,12 +1,11 @@
 use anyhow::Result;
-use femme::LevelFilter;
 use futures::FutureExt;
 use hyper::{
   header::{ALLOW, CONTENT_TYPE},
   http, Response, StatusCode,
 };
 use hyper::{Body, Request, Server};
-use log::info;
+use tracing::info;
 use treemux::{middleware_fn, middlewares, AllowedMethods, RouterBuilder, Treemux};
 
 async fn todos(_req: Request<Body>) -> Result<Response<Body>, http::Error> {
@@ -56,7 +55,7 @@ async fn method_not_allowed(req: Request<Body>) -> Result<Response<Body>, http::
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  femme::with_level(LevelFilter::Debug);
+  tracing_subscriber::fmt::init();
   let router = Treemux::builder();
 
   let router = router.middleware(middleware_fn(move |next| {

@@ -1,30 +1,25 @@
 //! # Treemux
-//
-//! [![Documentation](https://img.shields.io/badge/docs-0.5.1-4d76ae?style=for-the-badge)](https://docs.rs/treemux/0.5.1)
-//! [![Version](https://img.shields.io/crates/v/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
-//! [![License](https://img.shields.io/crates/l/treemux?style=for-the-badge)](https://crates.io/crates/treemux)
-//! [![Actions](https://img.shields.io/github/workflow/status/casualjim/rs-treemux/Rust/master?style=for-the-badge)](https://github.com/casualjim/rs-treemux/actions)
-
+//!
 //! Treemux is a lightweight high performance HTTP request router.
-
+//!
 //! This router supports variables in the routing pattern and matches against the request method. It also scales very well.
-
+//!
 //! The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching.
-
+//!
 //! Treemux started as a fork of [httprouter-rs](https://github.com/ibraheemdev/httprouter-rs) by @ibraheemdev.
 //! If you're familiar with the go world, this is the equivalent of [httptreemux](https://github.com/dimfeld/httptreemux) from @dimfeld vs [httprouter](https://github.com/julienschmidt/httprouter) from @julienschmidt. It also adds some middleware support, based on `tower-layer`.
-
+//!
 //! ## Usage
-
+//!
 //! Here is a simple example:
-
+//!
 //! ```rust ,no_run
 //! use treemux::{middleware_fn, Treemux, RouterBuilder, Params, RequestExt};
 //! use treemux::middlewares;
 //! use std::convert::Infallible;
 //! use hyper::{Request, Response, Body};
 //! use hyper::http::Error;
-
+//!
 //! async fn index(_: Request<Body>) -> Result<Response<Body>, Error> {
 //!   Ok(Response::new("Hello, World!".into()))
 //! }
@@ -67,7 +62,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!   femme::with_level(femme::LevelFilter::Debug);
+//!   tracing_subscriber::fmt::init();
 //!
 //!   let mut router = Treemux::builder();
 //!   router.get("/docs", |_req| async {
@@ -211,9 +206,9 @@
 //! The router has special handling for paths with trailing slashes. If a pattern is added to the router with a trailing slash, any matches on that pattern without a trailing slash will be redirected to the version with the slash. If a pattern does not have a trailing slash, matches on that pattern with a trailing slash will be redirected to the version without.
 //!
 //! The trailing slash flag is only stored once for a pattern. That is, if a pattern is added for a method with a trailing slash, all other methods for that pattern will also be considered to have a trailing slash, regardless of whether or not it is specified for those methods too.
-//! However this behavior can be turned off by setting TreeMux.RedirectTrailingSlash to false. By default it is set to true.
+//! However this behavior can be turned off by setting [Treemux.redirect_trailing_slash](https://docs.rs/treemux/latest/treemux/struct.Builder.html#structfield.redirect_trailing_slash) to false. By default it is set to true.
 //!
-//! One exception to this rule is catch-all patterns. By default, trailing slash redirection is disabled on catch-all patterns, since the structure of the entire URL and the desired patterns can not be predicted. If trailing slash removal is desired on catch-all patterns, set TreeMux.RemoveCatchAllTrailingSlash to true.
+//! One exception to this rule is catch-all patterns. By default, trailing slash redirection is disabled on catch-all patterns, since the structure of the entire URL and the desired patterns can not be predicted. If trailing slash removal is desired on catch-all patterns, set [Treemux::remove_catch_all_trailing_slash](https://docs.rs/treemux/latest/treemux/struct.Builder.html#structfield.remove_catch_all_trailing_slash) to true.
 //!
 //! ```ignore
 //! let mut router = Treemux::builder()
@@ -416,9 +411,6 @@
 //! }
 //! ```
 
-#[macro_use]
-extern crate kv_log_macro;
-
 pub mod middlewares;
 pub(crate) mod path;
 mod serve;
@@ -468,9 +460,9 @@ mod test_readme {
   macro_rules! doc_comment {
     ($x:expr) => {
       #[doc = $x]
-      extern {}
+      extern "C" {}
     };
-    }
+  }
 
   doc_comment!(include_str!("../README.md"));
 }

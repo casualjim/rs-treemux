@@ -1029,6 +1029,8 @@ mod tests {
       Arc, Mutex,
     },
   };
+  use test_env_log::test;
+  use tracing::info;
 
   use hyper::{body, header::HeaderValue, http, Body, Method, Request, Response, StatusCode};
 
@@ -1048,11 +1050,8 @@ mod tests {
     Builder::default().get("", empty_ok_response);
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn scope_slash_mapping() {
-    if std::env::var("TEST_LOG").is_ok() {
-      femme::try_with_level(femme::LevelFilter::Trace).ok();
-    }
     let mut b = Builder::default();
     b.scope("/foo").get("/", empty_ok_response);
     let router = b.build();
@@ -1074,11 +1073,8 @@ mod tests {
     assert_eq!(response.status(), StatusCode::OK);
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn empty_scope_mapping() {
-    if std::env::var("TEST_LOG").is_ok() {
-      femme::try_with_level(femme::LevelFilter::Trace).ok();
-    }
     let mut b = Builder::default();
     b.scope("/foo").get("", empty_ok_response);
     let router = b.build();
@@ -1092,19 +1088,19 @@ mod tests {
     assert_eq!(response.status(), StatusCode::OK);
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn group_method_scenarios() {
     group_methods(false).await;
     group_methods(true).await;
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   #[should_panic]
   async fn invalid_path() {
     let mut b = Builder::default();
     b.scope("foo");
   }
-  #[tokio::test]
+  #[test(tokio::test)]
   #[should_panic]
   async fn invalid_sub_path() {
     let mut b = Builder::default();
@@ -1112,7 +1108,7 @@ mod tests {
     g.scope("bar");
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn set_get_after_head() {
     let make_handler = |method: Method| {
       Box::new(move |_req: Request<Body>| {
@@ -1167,7 +1163,7 @@ mod tests {
     test_method(Method::GET, Method::GET).await;
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn not_found() {
     let mut router = Treemux::builder();
     router.get("/user/abc", empty_ok_response);
@@ -1203,7 +1199,7 @@ mod tests {
     )
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn method_not_allowed_handler() {
     let mut router = Treemux::builder();
     router.get("/user/abc", empty_ok_response);
@@ -1290,7 +1286,7 @@ mod tests {
     )
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn handle_options() {
     let make_router = || {
       let mut router = Treemux::builder();
@@ -1435,7 +1431,7 @@ mod tests {
     assert_eq!("DELETE, GET, HEAD, PUT", allow.join(", "));
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn panic() {
     let mut router = Treemux::builder();
     router.get("/abc", |_req| async {
@@ -1468,11 +1464,8 @@ mod tests {
     assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, res.status());
     assert_eq!("done", res.headers().get("X-Result").unwrap().to_str().unwrap());
   }
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn redirects() {
-    if std::env::var("TEST_LOG").is_ok() {
-      femme::try_with_level(femme::LevelFilter::Trace).ok();
-    }
     use RedirectBehavior::*;
     info!("Testing with all {}", StatusCode::MOVED_PERMANENTLY);
     redirect(Redirect301, Redirect301, Redirect301, false).await;
@@ -1644,7 +1637,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn skip_redirect() {
     let mut router = Treemux::builder();
     router.redirect_trailing_slash = false;
@@ -1662,7 +1655,7 @@ mod tests {
     assert_eq!(StatusCode::NOT_FOUND, resp.status());
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn catch_all_trailing_slash() {
     let redirect_settings = vec![false, true];
 
@@ -1701,7 +1694,7 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn root() {
     let mut router = Treemux::builder();
     router.get("/", |_| async {
@@ -1722,7 +1715,7 @@ mod tests {
     assert_eq!(StatusCode::NO_CONTENT, resp.status());
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn wildcard_at_split_node() {
     let mut router = Treemux::builder();
     router.get("/pumpkin", slug_handler);
@@ -1769,7 +1762,7 @@ mod tests {
     Ok(Response::new(Body::from(val)))
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn slash() {
     let mut router = Treemux::builder();
     router.get("/abc/:param", param_handler);
@@ -1801,7 +1794,7 @@ mod tests {
     assert_eq!("de/ fg/", &param);
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn query_string() {
     let mut router = Treemux::builder();
     router.get("/static", param_handler);
@@ -1892,7 +1885,7 @@ mod tests {
     .add(b'}')
     .add(b'~');
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn redirect_escaped_path() {
     let mut router = Treemux::builder();
     router.get("/:escaped/", empty_ok_response);
@@ -1916,7 +1909,7 @@ mod tests {
     assert_eq!("/Test%20P@th/", &location);
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn escaped_routes() {
     let test_cases = vec![
       ("/abc/def", "/abc/def", "", ""),
@@ -1991,11 +1984,8 @@ mod tests {
     }
   }
 
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn test_middlewares() {
-    if std::env::var("TEST_LOG").is_ok() {
-      femme::try_with_level(femme::LevelFilter::Trace).ok();
-    }
     let counter = Arc::new(AtomicU64::new(0));
     let mut mux = Treemux::builder();
 
@@ -2058,7 +2048,7 @@ mod tests {
   fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
     type_name::<T>()
   }
-  #[tokio::test]
+  #[test(tokio::test)]
   async fn test_not_found() {
     let mut mux = Treemux::builder();
 

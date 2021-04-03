@@ -1,12 +1,11 @@
-use femme::LevelFilter;
 use futures::FutureExt;
-use hyper::{Body, Response, Server};
-use kv_log_macro::info;
+use hyper::{Response, Server};
+use tracing::info;
 use treemux::{middleware_fn, middlewares, RouterBuilder, Treemux};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  femme::with_level(LevelFilter::Trace);
+  tracing_subscriber::fmt::init();
 
   let mut router = Treemux::builder();
   router.get("/without", |_req| async { Ok(Response::new("no middlewares".into())) });

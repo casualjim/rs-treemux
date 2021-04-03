@@ -66,7 +66,7 @@ use treemux::{RequestExt, RouterBuilder, Treemux};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  femme::with_level(femme::LevelFilter::Debug);
+  tracing_subscriber::fmt::init();
 
   let mut router = Treemux::builder();
   router.get("/docs", |_req| async {
@@ -210,9 +210,9 @@ fn main() {
 The router has special handling for paths with trailing slashes. If a pattern is added to the router with a trailing slash, any matches on that pattern without a trailing slash will be redirected to the version with the slash. If a pattern does not have a trailing slash, matches on that pattern with a trailing slash will be redirected to the version without.
 
 The trailing slash flag is only stored once for a pattern. That is, if a pattern is added for a method with a trailing slash, all other methods for that pattern will also be considered to have a trailing slash, regardless of whether or not it is specified for those methods too.
-However this behavior can be turned off by setting TreeMux.RedirectTrailingSlash to false. By default it is set to true.
+However this behavior can be turned off by setting [Treemux.redirect_trailing_slash](https://docs.rs/treemux/latest/treemux/struct.Builder.html#structfield.redirect_trailing_slash) to false. By default it is set to true.
 
-One exception to this rule is catch-all patterns. By default, trailing slash redirection is disabled on catch-all patterns, since the structure of the entire URL and the desired patterns can not be predicted. If trailing slash removal is desired on catch-all patterns, set TreeMux.RemoveCatchAllTrailingSlash to true.
+One exception to this rule is catch-all patterns. By default, trailing slash redirection is disabled on catch-all patterns, since the structure of the entire URL and the desired patterns can not be predicted. If trailing slash removal is desired on catch-all patterns, set [Treemux::remove_catch_all_trailing_slash](https://docs.rs/treemux/latest/treemux/struct.Builder.html#structfield.remove_catch_all_trailing_slash) to true.
 
 ```rust ,ignore
 let mut router = Treemux::builder()
@@ -332,6 +332,31 @@ fn main() {
 
 ## Extra use cases
 
+### Static files
+
+You can use the router to serve pages from a static file directory with the [static_files helper method](examples/staticfile.rs). Remember that you need to specify 2 routes to handle the '/' and '/*' cases.
+
+To enable this add the `hyper-staticfile` crate to your cargo.toml.
+
+```rust ,ignore
+use hyper::Server;
+use treemux::{static_files, RouterBuilder, Treemux};
+
+// requires `hyper-staticfile = "0.6"` in cargo.toml
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+  let mut router = Treemux::builder();
+  router.get("/", static_files("./examples/static"));
+  router.get("/*", static_files("./examples/static"));
+
+  Server::bind(&([127, 0, 0, 1], 3000).into())
+    .serve(router.into_service())
+    .await?;
+  Ok(())
+}
+```
+
 ### Multi-domain / Sub-domains
 
 Here is a quick example: Does your server serve multiple domains / hosts? You want to use sub-domains? Define a router per host!
@@ -392,27 +417,3 @@ async fn main() {
 }
 ```
 
-### Static files
-
-You can use the router to serve pages from a static file directory with the [static_files helper method](examples/staticfile.rs).
-
-To enable this add the `hyper-staticfile` crate to your cargo.toml.
-
-```rust ,ignore
-use hyper::Server;
-use treemux::{static_files, RouterBuilder, Treemux};
-
-// requires `hyper-staticfile = "0.6"` in cargo.toml
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-  let mut router = Treemux::builder();
-  router.get("/", static_files("./examples/static"));
-  router.get("/*", static_files("./examples/static"));
-
-  Server::bind(&([127, 0, 0, 1], 3000).into())
-    .serve(router.into_service())
-    .await?;
-  Ok(())
-}
-```

@@ -8,13 +8,14 @@ license = "MIT"
 name = "treemux"
 readme = "README.md"
 repository = "https://github.com/casualjim/rs-treemux/"
-version = "0.5.1"
+version = "0.6.0"
 
 [features]
 default = []
 native-tls = ["hyper-tls"]
 rustls = ["hyper-rustls", "tokio-rustls"]
-full = [ "hyper-staticfile", "async-compression" ]
+full = [ "hyper-staticfile", "async-compression", "tracing", "tracing-log" ]
+
 
 [dependencies]
 anyhow = "1"
@@ -22,7 +23,6 @@ thiserror = "1"
 flate2 = "1"
 futures = "0.3"
 futures-util = "0.3"
-kv-log-macro = "1"
 percent-encoding = "2"
 tokio = "1"
 tower-service = "0.3"
@@ -32,24 +32,20 @@ hyper-rustls = { version = "0.22", optional = true }
 tokio-rustls = { version = "0.22", optional = true }
 hyper-staticfile = { version = "0.6", optional = true }
 async-compression = { version = "0.3", optional = true }
+tracing = { version="0.1", optional = true }
+tracing-log = { version="0.1", optional = true }
 
 [dependencies.hyper]
 features = ["server", "tcp", "http1", "http2"]
 version = "0.14"
 
-[dependencies.log]
-features = ["kv_unstable_std"]
-version = "0.4"
-
 [dev-dependencies]
-pretty_env_logger = "0.4"
+env_logger = "0.8"
 serde = "1"
 serde_json = "1"
 hyper-staticfile = "0.6"
-
-[dev-dependencies.femme]
-branch = "allow-test-usage"
-git = "https://github.com/casualjim/femme"
+tracing-subscriber =  {version = "0.2", features = ["chrono", "env-filter", "fmt"]}
+test-env-log = "0.2"
 
 [dev-dependencies.tokio]
 features = ["full"]

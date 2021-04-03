@@ -1,12 +1,12 @@
 use futures::FutureExt;
 use hyper::{Body, Request, Response, Server};
 
-use kv_log_macro::info;
+use tracing::info;
 use treemux::{middleware_fn, RequestExt, RouterBuilder, Treemux};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  femme::with_level(femme::LevelFilter::Debug);
+  tracing_subscriber::fmt::init();
 
   let mut router = Treemux::builder().middleware(middleware_fn(move |next| {
     info!("global middleware constructor");

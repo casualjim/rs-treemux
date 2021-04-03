@@ -914,6 +914,7 @@ mod tests {
   use super::{Handler, HandlerConfig, Node, Params};
 
   type ReqHandler = Arc<dyn Fn(Request<Body>) -> Response<Body>>;
+  use tracing::debug;
 
   fn make_root_node<'a>() -> Node<'a, ReqHandler> {
     let mut root = Node::new();
