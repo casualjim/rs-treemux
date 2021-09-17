@@ -7,6 +7,7 @@ use tracing::{error, info, trace, warn};
 use crate::Handler;
 
 /// Logs requests with the kvlog macro.
+#[cfg(feature = "tracing")]
 pub fn log_requests<H, R>(next: H) -> Handler
 where
   H: Fn(Request<Body>) -> R + Send + Sync + 'static,

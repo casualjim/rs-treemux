@@ -17,7 +17,7 @@ all-features = true
 default = []
 native-tls = ["hyper-tls"]
 rustls = ["hyper-rustls", "tokio-rustls"]
-full = ["hyper-staticfile", "async-compression"]
+full = [ "hyper-staticfile", "async-compression", "tracing" ]
 
 
 [dependencies]
@@ -35,8 +35,8 @@ hyper-rustls = { version = "0.22", optional = true }
 tokio-rustls = { version = "0.22", optional = true }
 hyper-staticfile = { version = "0.6", optional = true }
 async-compression = { version = "0.3", optional = true }
-tracing = { version="0.1"}
-tracing-log = { version="0.1"}
+tracing = { version="0.1", optional = true }
+cookie = { version="0.15", optional = true }
 
 [dependencies.hyper]
 features = ["server", "tcp", "http1", "http2"]

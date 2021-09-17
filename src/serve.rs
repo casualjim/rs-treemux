@@ -41,7 +41,6 @@ where
       remote_addr: conn.remote_addr(),
     };
 
-    // let service = self.1.clone();
     let fut = async move { Ok::<_, Infallible>(service) };
     Box::pin(fut)
   }
@@ -69,7 +68,6 @@ where
       remote_addr: conn.get_ref().get_ref().get_ref().peer_addr().unwrap(),
     };
 
-    // let service = self.1.clone();
     let fut = async move { Ok::<_, Infallible>(service) };
     Box::pin(fut)
   }
@@ -97,7 +95,6 @@ where
       remote_addr: conn.get_ref().0.peer_addr().unwrap(),
     };
 
-    // let service = self.1.clone();
     let fut = async move { Ok::<_, Infallible>(service) };
     Box::pin(fut)
   }
