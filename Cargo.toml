@@ -8,7 +8,7 @@ license = "MIT"
 name = "treemux"
 readme = "README.md"
 repository = "https://github.com/casualjim/rs-treemux/"
-version = "0.7.0"
+version = "0.7.1"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -47,6 +47,7 @@ env_logger = "0.9"
 serde = "1"
 serde_json = "1"
 hyper-staticfile = "0.6"
+tracing = { version="0.1" }
 tracing-subscriber =  {version = "0.2", features = ["chrono", "env-filter", "fmt"]}
 test-env-log = "0.2"
 
@@ -57,6 +58,7 @@ version = "1"
 [[example]]
 name = "jsonapi"
 path = "examples/jsonapi.rs"
+required-features = ["tracing"]
 
 [[example]]
 name = "simple"
@@ -70,6 +72,7 @@ required-features = ["hyper-staticfile"]
 [[example]]
 name = "middlewares"
 path = "examples/middlewares.rs"
+required-features = ["tracing"]
 
 [[example]]
 name = "scoping"

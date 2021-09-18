@@ -2,6 +2,8 @@ use std::time::SystemTime;
 
 use futures::Future;
 use hyper::{header::HeaderValue, http, Body, Request, Response};
+
+#[cfg(feature = "tracing")]
 use tracing::{error, info, trace, warn};
 
 use crate::Handler;
