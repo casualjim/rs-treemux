@@ -8,7 +8,7 @@ license = "MIT"
 name = "treemux"
 readme = "README.md"
 repository = "https://github.com/casualjim/rs-treemux/"
-version = "0.7.1"
+version = "0.7.2"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -31,7 +31,7 @@ tokio = "1"
 tower-service = "0.3"
 tower-layer = "0.3"
 hyper-tls = { version = "0.5", optional = true }
-hyper-rustls = { version = "0.22", optional = true }
+hyper-rustls = { version = "0.23", optional = true }
 hyper-staticfile = { version = "0.8", optional = true }
 tokio-rustls = { version = "0.23", optional = true }
 async-compression = { version = "0.3", optional = true }
@@ -48,7 +48,7 @@ serde = "1"
 serde_json = "1"
 hyper-staticfile = "0.8"
 tracing = { version="0.1" }
-tracing-subscriber =  {version = "0.2", features = ["chrono", "env-filter", "fmt"]}
+tracing-subscriber =  {version = "0.3.2", features = ["env-filter", "fmt"]}
 test-env-log = "0.2"
 
 [dev-dependencies.tokio]
