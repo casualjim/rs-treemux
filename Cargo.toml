@@ -36,7 +36,7 @@ hyper-staticfile = { version = "0.8", optional = true }
 tokio-rustls = { version = "0.23", optional = true }
 async-compression = { version = "0.3", optional = true }
 tracing = { version="0.1", optional = true }
-cookie = { version="0.15", optional = true }
+cookie = { version="0.16", optional = true }
 
 [dependencies.hyper]
 features = ["server", "tcp", "http1", "http2"]
