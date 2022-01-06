@@ -1029,7 +1029,7 @@ mod tests {
       Arc, Mutex,
     },
   };
-  use test_env_log::test;
+  use test_log::test;
   use tracing::info;
 
   use hyper::{body, header::HeaderValue, http, Body, Method, Request, Response, StatusCode};
