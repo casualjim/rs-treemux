@@ -48,7 +48,7 @@ serde = "1"
 serde_json = "1"
 hyper-staticfile = "0.8"
 tracing = { version="0.1" }
-tracing-subscriber =  {version = "0.3.7", features = ["env-filter", "fmt"]}
+tracing-subscriber =  {version = "0.3.9", features = ["env-filter", "fmt"]}
 test-log = "0.2"
 
 [dev-dependencies.tokio]
