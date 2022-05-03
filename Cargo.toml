@@ -8,7 +8,7 @@ license = "MIT"
 name = "treemux"
 readme = "README.md"
 repository = "https://github.com/casualjim/rs-treemux/"
-version = "0.8.0"
+version = "0.8.1"
 
 [package.metadata.docs.rs]
 all-features = true
