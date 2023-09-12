@@ -332,7 +332,7 @@ impl<'a, M, S> GroupBuilder<'a, M, S> {
     check_path(p.clone());
     let pth = format!("{}{}", self.prefix, p.as_ref());
     self.inner.root.lock().unwrap().extend(
-      (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
+      pth.strip_suffix('/').unwrap_or(&pth).to_string().into(),
       routes.into().root,
     )
   }
@@ -347,7 +347,7 @@ impl<'a, M, S> GroupBuilder<'a, M, S> {
     let pth = format!("{}{}", self.prefix, p.as_ref());
 
     GroupBuilder {
-      prefix: (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
+      prefix: pth.strip_suffix('/').unwrap_or(&pth).to_string().into(),
       inner: self.inner,
       stack: self.stack,
     }
@@ -456,7 +456,7 @@ impl<M> Builder<M> {
     check_path(p.clone());
     let pth = format!("{}{}", self.path, p.as_ref());
     self.root.lock().unwrap().extend(
-      (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
+      pth.strip_suffix('/').unwrap_or(&pth).to_string().into(),
       routes.into().root,
     )
   }
@@ -473,7 +473,7 @@ impl<M> Builder<M> {
     check_path(p.clone());
     let pth = format!("{}{}", self.path, p.as_ref());
     GroupBuilder {
-      prefix: (&pth).strip_suffix('/').unwrap_or(&pth).to_string().into(),
+      prefix: pth.strip_suffix('/').unwrap_or(&pth).to_string().into(),
       inner: self,
       stack: Identity::new(),
     }
